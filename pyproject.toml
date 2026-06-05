@@ -1,0 +1,24 @@
+[project]
+name = "expensescalculatoragenticbot"
+version = "0.1.0"
+description = "Expenses Tracking with Agentic AI in Telegram"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3>=1.43.23",
+    "httpx>=0.28.1",
+    "langchain-core>=1.4.0",
+    "pydantic-settings>=2.14.1",
+]
+
+[dependency-groups]
+dev = [
+    "moto[dynamodb]>=5.2.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "respx>=0.23.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
