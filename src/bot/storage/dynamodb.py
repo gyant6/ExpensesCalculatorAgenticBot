@@ -42,7 +42,7 @@ def update_item(pk: str, sk: str, fields: dict) -> None:
 
     Args:
         pk: Partition key value (e.g. 'USER#123456789').
-        sk: Sort key value (e.g. 'EXPENSE#2026-06-04T14:32:05.123456').
+        sk: Sort key value (e.g. 'EXPENSE#2026-06-04T14:32:05.123456+00:00').
         fields: Dict of attribute names to their new Python-native values. Must not be empty.
 
     Raises:
@@ -94,7 +94,7 @@ def get_item(pk: str, sk: str) -> dict | None:
 
     Args:
         pk: Partition key value (e.g. 'USER#123456789').
-        sk: Sort key value (e.g. 'EXPENSE#2026-06-04T14:32:05.123456').
+        sk: Sort key value (e.g. 'EXPENSE#2026-06-04T14:32:05.123456+00:00').
 
     Returns:
         The item as a plain dict, or None if no item exists at that key.
@@ -124,7 +124,7 @@ def delete_item(pk: str, sk: str) -> None:
 
     Args:
         pk: Partition key value (e.g. 'USER#123456789').
-        sk: Sort key value (e.g. 'EXPENSE#2026-06-04T14:32:05.123456').
+        sk: Sort key value (e.g. 'EXPENSE#2026-06-04T14:32:05.123456+00:00').
 
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.

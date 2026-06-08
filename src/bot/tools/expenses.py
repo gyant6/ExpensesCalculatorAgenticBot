@@ -74,7 +74,8 @@ def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id
     return "Expense recorded."
 
 
-def edit_expense():
+def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")], ):
+    # source_message: str, summary: str, category: str, amount: str, currency: str, date: str, payment_method: str = "Cash") -> str:
     raise NotImplementedError()
 
 
@@ -82,5 +83,28 @@ def delete_expense():
     raise NotImplementedError()
 
 
-def get_all_expenses():
-    raise NotImplementedError()
+@tool
+def get_all_expenses(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")]) -> str:
+    """Retrieve all recorded expenses for the user.
+
+    Call this when the user asks to see their expenses, wants a summary of spending,
+    or asks questions like "what have I spent so far" or "show me my expenses".
+
+    Returns:
+        A formatted list of expenses as a string, one per line, with columns:
+        index, summary, category, amount, currency, date, payment_method.
+        Returns a message indicating no expenses if none are recorded.
+
+    Raises:
+        botocore.exceptions.ClientError: If the DynamoDB request fails.
+    """
+    items = dynamodb.query_by_prefix(f"USER#{telegram_user_id}", "EXPENSE#")
+    
+    if not items:
+        return "There is currently no expenses recorded."
+    
+    response = "summary | category | amount | date | payment_method"
+    for i, expense in enumerate(items, start=1):
+        response += f"\n{i}. {expense["summary"]} | {expense["category"]} | {expense["amount"]} {expense["currency"]} | {expense["date"]} | {expense["payment_method"]}"
+        
+    return response

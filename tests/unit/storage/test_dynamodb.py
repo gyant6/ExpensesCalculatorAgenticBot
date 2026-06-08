@@ -157,8 +157,9 @@ def test_query_by_prefix_returns_multiple_items(dynamodb_table):
     }
     dynamodb.put_item(item1)
     dynamodb.put_item(item2)
+    result = dynamodb.query_by_prefix("USER#00000000", "EXPENSE#")
 
-    assert sorted(dynamodb.query_by_prefix("USER#00000000", "EXPENSE#"), key=lambda x: x["SK"]) == sorted([item1, item2], key=lambda x: x["SK"])
+    assert sorted(result, key=lambda x: x["SK"]) == sorted([item1, item2], key=lambda x: x["SK"])
 
 
 def test_query_by_prefix_returns_only_matching_items(dynamodb_table):

@@ -23,7 +23,7 @@ def base_expense():
 
 def test_add_expense(dynamodb_table, base_expense):    
     with patch('src.bot.tools.expenses.datetime') as mock_dt:       
-        mock_dt.now.return_value = datetime(2023, 12, 20, 13, 45, 50, tzinfo=timezone.utc)
+        mock_dt.now.return_value = datetime(2023, 12, 20, 13, 45, 50, 123456, tzinfo=timezone.utc)
         mock_dt.strptime.side_effect = datetime.strptime
         datetime_now = mock_dt.now().isoformat()
 
@@ -47,7 +47,7 @@ def test_add_expense(dynamodb_table, base_expense):
 
 def test_add_expense_default_payment_method(dynamodb_table, base_expense):    
     with patch('src.bot.tools.expenses.datetime') as mock_dt:       
-        mock_dt.now.return_value = datetime(2023, 12, 20, 13, 45, 50, tzinfo=timezone.utc)
+        mock_dt.now.return_value = datetime(2023, 12, 20, 13, 45, 50, 123456, tzinfo=timezone.utc)
         mock_dt.strptime.side_effect = datetime.strptime
         datetime_now = mock_dt.now().isoformat()
 
@@ -116,3 +116,58 @@ def test_add_expense_invalid_category(base_expense):
     })
     
     assert tool_output == "category should be one of ['Accommodation', 'Car Rental', 'Flight', 'Food', 'Insurance', 'Leisure', 'Misc', 'Shopping', 'Transport']"
+
+
+def test_get_all_expenses_no_expenses(dynamodb_table):
+    tool_output = expenses.get_all_expenses.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID
+    })
+    assert tool_output == "There is currently no expenses recorded."
+    
+    
+def test_get_all_expenses_single_expense(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        **base_expense,
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        "payment_method": "Cash"
+    })
+    
+    expected_output = "summary | category | amount | date | payment_method"
+    expected_output += "\n1. Breakfast at Yakun | Food | 6.13 SGD | 2023-12-20 | Cash"
+    tool_output = expenses.get_all_expenses.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID
+    })
+    
+    assert expected_output == tool_output
+    
+    
+def test_get_all_expenses_multiple_expenses_ordered_by_insertion(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        **base_expense,
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#2023-12-20T01:02:03.456789+00:00",
+        "payment_method": "Cash"
+    })
+
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#2023-01-15T12:34:56.789101+00:00",
+        "source_message": "Jeans from Uniqlo $78.13",
+        "summary": "Jeans from Uniqlo",
+        "category": "Shopping",
+        "amount": "345.67",
+        "currency": "MYR",
+        "date": "2023-01-25",
+        "payment_method": "Card"
+    })
+    
+    expected_output = "summary | category | amount | date | payment_method"
+    expected_output += "\n1. Jeans from Uniqlo | Shopping | 345.67 MYR | 2023-01-25 | Card"
+    expected_output += "\n2. Breakfast at Yakun | Food | 6.13 SGD | 2023-12-20 | Cash"
+    
+    tool_output = expenses.get_all_expenses.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID
+    })
+    
+    assert expected_output == tool_output
