@@ -3,8 +3,8 @@ from src.bot.storage import dynamodb
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from langchain_core.tools import tool
-from typing import Annotated
 from langgraph.prebuilt import InjectedState
+from typing import Annotated
 
 CATEGORIES = {
     "Food", "Car Rental", "Transport", "Accommodation", 
@@ -13,7 +13,7 @@ CATEGORIES = {
 
 
 @tool
-def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")], source_message: str, summary: str, category: str, amount: str, currency: str, date: str, payment_method: str) -> str:
+def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")], source_message: str, summary: str, category: str, amount: str, currency: str, date: str, payment_method: str = "Cash") -> str:
     """Record a new expense for the user in DynamoDB.
 
     Call this when the user describes an expense — e.g. "spent $12 on lunch", "paid 500 yen
@@ -33,6 +33,7 @@ def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id
             date explicitly mentioned by the user, or fall back to the Telegram message date
             from agent state if none is mentioned.
         payment_method: How the expense was paid (e.g. 'Cash', 'Card', 'PayNow').
+            If the payment method is not mentioned, fall back to 'Cash'.
 
     Returns:
         A confirmation string on success, or an error string describing what was invalid.
@@ -71,6 +72,7 @@ def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id
     })
     
     return "Expense recorded."
+
 
 def edit_expense():
     raise NotImplementedError()
