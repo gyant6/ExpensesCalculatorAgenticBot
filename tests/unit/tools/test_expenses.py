@@ -399,6 +399,85 @@ def test_edit_expense_invalid_date_format(dynamodb_table, base_expense):
     assert tool_output == "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
 
 
+def test_delete_expense_deletes_single_item(dynamodb_table, base_expense):
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    sk = "EXPENSE#1"
+    
+    dynamodb.put_item({
+        "PK": pk,
+        "SK": sk,
+        **base_expense
+    })
+    
+    tool_output = expenses.delete_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1
+    })
+    
+    assert tool_output == "Expense deleted."
+    assert dynamodb.get_item(pk, sk) is None
+    assert len(dynamodb.query_by_prefix(pk, "EXPENSE#")) == 0
+
+
+def test_delete_expense_deletes_correct_item_when_multiple_exist(dynamodb_table, base_expense):
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    item1 = {
+        "PK": pk,
+        "SK": "EXPENSE#1",
+        **base_expense
+    }
+    dynamodb.put_item(item1)
+    
+    item2 = {
+        "PK": pk,
+        "SK": "EXPENSE#2",
+        **base_expense
+    }
+    dynamodb.put_item(item2)
+    
+    tool_output = expenses.delete_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1
+    })
+    
+    assert tool_output == "Expense deleted."
+    assert dynamodb.get_item(pk, item1["SK"]) is None
+    assert dynamodb.get_item(pk, item2["SK"]) == item2
+    assert len(dynamodb.query_by_prefix(pk, "EXPENSE#")) == 1
+
+
+def test_delete_expense_returns_error_when_expense_num_is_zero():
+    tool_output = expenses.delete_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 0
+    })
+    
+    assert tool_output == "Invalid expense number. Use the numbered list from get_all_expenses."
+
+
+def test_delete_expense_returns_error_when_expense_num_exceeds_list(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        **base_expense
+    })
+    
+    tool_output = expenses.delete_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 2
+    })
+    
+    assert tool_output == "Invalid expense number. Use the numbered list from get_all_expenses."
+
+
+def test_delete_expense_returns_error_when_no_expenses_exist(dynamodb_table):
+    tool_output = expenses.delete_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1
+    })
+
+    assert tool_output == "There are no items to delete. Add an expense to be tracked first."
+
 
 def test_get_all_expenses_no_expenses(dynamodb_table):
     tool_output = expenses.get_all_expenses.invoke({

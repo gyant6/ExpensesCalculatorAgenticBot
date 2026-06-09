@@ -190,8 +190,37 @@ def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_i
     return "Edit expense successful."
 
 
-def delete_expense():
-    raise NotImplementedError()
+@tool
+def delete_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")], expense_num: int) -> str:
+    """Delete an existing expense by its list position.
+
+    Call this when the user wants to remove a previously recorded expense —
+    e.g. "delete expense 2", "remove the third expense", "that entry was a mistake".
+
+    Args:
+        expense_num: 1-based index of the expense to delete, as shown by get_all_expenses.
+
+    Returns:
+        A confirmation string on success, or an error string if the expense number is
+        invalid or no expenses exist.
+
+    Raises:
+        botocore.exceptions.ClientError: If the DynamoDB request fails.
+    """
+    invalid_expense_str = "Invalid expense number. Use the numbered list from get_all_expenses."
+    if expense_num < 1:
+        return invalid_expense_str
+
+    pk = f"USER#{telegram_user_id}"
+    items = dynamodb.query_by_prefix(pk, "EXPENSE#")
+    if not items:
+        return "There are no items to delete. Add an expense to be tracked first."
+    if expense_num > len(items):
+        return invalid_expense_str
+    
+    item = items[expense_num-1]
+    dynamodb.delete_item(pk, item["SK"])
+    return "Expense deleted."
 
 
 @tool
