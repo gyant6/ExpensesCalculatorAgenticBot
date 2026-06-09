@@ -45,6 +45,79 @@ def test_add_expense(dynamodb_table, base_expense):
     }
 
 
+def test_add_expense_default_payment_method(dynamodb_table, base_expense):    
+    with patch('src.bot.tools.expenses.datetime') as mock_dt:       
+        mock_dt.now.return_value = datetime(2023, 12, 20, 13, 45, 50, 123456, tzinfo=timezone.utc)
+        mock_dt.strptime.side_effect = datetime.strptime
+        datetime_now = mock_dt.now().isoformat(timespec='microseconds')
+
+        tool_output = expenses.add_expense.invoke({
+            **base_expense,
+            "telegram_user_id": TELEGRAM_USER_ID
+        })
+   
+    assert tool_output == "Expense recorded."
+    
+    item = dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", f"EXPENSE#{datetime_now}")
+    assert item == {
+        **base_expense,
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": f"EXPENSE#{datetime_now}",
+        "payment_method": "Cash",
+        "updated_at": datetime_now
+    }
+
+
+def test_add_expense_invalid_date_format(base_expense):
+    tool_output = expenses.add_expense.invoke({
+        **base_expense,
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "date": "2023-13-20"
+    })
+    
+    assert tool_output == "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
+
+
+def test_add_expense_invalid_amount(base_expense):
+    tool_output = expenses.add_expense.invoke({
+        **base_expense,
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "amount": "invalid_amount"
+    })
+    
+    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
+
+
+def test_add_expense_zero_amount(base_expense):
+    tool_output = expenses.add_expense.invoke({
+        **base_expense,
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "amount": "0"
+    })
+    
+    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
+
+
+def test_add_expense_negative_amount(base_expense):
+    tool_output = expenses.add_expense.invoke({
+        **base_expense,
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "amount": "-1.35"
+    })
+    
+    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
+
+
+def test_add_expense_invalid_category(base_expense):
+    tool_output = expenses.add_expense.invoke({
+        **base_expense,
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "category": "Casino"
+    })
+    
+    assert tool_output == "category should be one of ['Accommodation', 'Car Rental', 'Flight', 'Food', 'Insurance', 'Leisure', 'Misc', 'Shopping', 'Transport']"
+
+
 def test_edit_expense_no_date_change_multiple_fields(dynamodb_table, base_expense):
     
     datetime_now = datetime(2023, 12, 20, 1, 2, 3, 0, tzinfo=timezone.utc).isoformat(timespec='microseconds')
@@ -175,79 +248,6 @@ def test_edit_expense_date_change_reorders_list(dynamodb_table, base_expense):
     assert len(items_after_edit) == 2
     assert items_before_edit[1] == items_after_edit[0]
     assert items_after_edit[1].get("date") == new_date
-
-
-def test_add_expense_default_payment_method(dynamodb_table, base_expense):    
-    with patch('src.bot.tools.expenses.datetime') as mock_dt:       
-        mock_dt.now.return_value = datetime(2023, 12, 20, 13, 45, 50, 123456, tzinfo=timezone.utc)
-        mock_dt.strptime.side_effect = datetime.strptime
-        datetime_now = mock_dt.now().isoformat(timespec='microseconds')
-
-        tool_output = expenses.add_expense.invoke({
-            **base_expense,
-            "telegram_user_id": TELEGRAM_USER_ID
-        })
-   
-    assert tool_output == "Expense recorded."
-    
-    item = dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", f"EXPENSE#{datetime_now}")
-    assert item == {
-        **base_expense,
-        "PK": f"USER#{TELEGRAM_USER_ID}",
-        "SK": f"EXPENSE#{datetime_now}",
-        "payment_method": "Cash",
-        "updated_at": datetime_now
-    }
-
-
-def test_add_expense_invalid_date_format(base_expense):
-    tool_output = expenses.add_expense.invoke({
-        **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
-        "date": "2023-13-20"
-    })
-    
-    assert tool_output == "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
-
-
-def test_add_expense_invalid_amount(base_expense):
-    tool_output = expenses.add_expense.invoke({
-        **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
-        "amount": "invalid_amount"
-    })
-    
-    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
-
-
-def test_add_expense_zero_amount(base_expense):
-    tool_output = expenses.add_expense.invoke({
-        **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
-        "amount": "0"
-    })
-    
-    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
-
-
-def test_add_expense_negative_amount(base_expense):
-    tool_output = expenses.add_expense.invoke({
-        **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
-        "amount": "-1.35"
-    })
-    
-    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
-
-
-def test_add_expense_invalid_category(base_expense):
-    tool_output = expenses.add_expense.invoke({
-        **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
-        "category": "Casino"
-    })
-    
-    assert tool_output == "category should be one of ['Accommodation', 'Car Rental', 'Flight', 'Food', 'Insurance', 'Leisure', 'Misc', 'Shopping', 'Transport']"
 
 
 def test_get_all_expenses_no_expenses(dynamodb_table):
