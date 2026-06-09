@@ -143,6 +143,11 @@ START
   │  (if tool_calls in response)     │
   ▼                                  │
 [tools node]  ─── tool results ─────┘
+  │   ▲
+  │   │  interrupt_before=["end_trip"]:
+  │   │  graph pauses here, saves state to checkpointer,
+  │   │  returns control to telegram_handler.py which sends
+  │   │  confirmation prompt to user; resumes on next message
   │
   │  (if no tool_calls — final response)
   ▼
@@ -150,6 +155,8 @@ END
 ```
 
 This is a standard ReAct loop implemented as a LangGraph graph. The `agent` node calls Claude Haiku with the bound tools. If the model decides to call a tool, the `tools` node executes it and the result is appended to state. The loop continues until Claude returns a plain message.
+
+`end_trip` is configured with `interrupt_before=["end_trip"]` at graph compilation time. When the agent decides to call `end_trip`, the graph pauses before executing it, persists state to the DynamoDB checkpointer, and returns control to the Telegram handler. The handler sends a confirmation message to the user. On the next user message (confirmation), the graph resumes from the checkpoint and `end_trip` executes.
 
 ### State Definition
 
@@ -160,11 +167,14 @@ from langgraph.graph import MessagesState
 class AgentState(MessagesState):
     # MessagesState provides: messages: list[BaseMessage]
     # thread_id is managed by the checkpointer config, not state
-    telegram_user_id: str  # Set by telegram_handler.py on every invocation; injected into
-                           # tools via InjectedState so the LLM never sees or supplies it
-    message_date: str      # YYYY-MM-DD date of the incoming Telegram message; set by
-                           # telegram_handler.py; used by add_expense as fallback date when
-                           # the user does not explicitly mention one
+    telegram_user_id: str       # Set by telegram_handler.py on every invocation; injected into
+                                # tools via InjectedState so the LLM never sees or supplies it
+    message_date: str           # YYYY-MM-DD date of the incoming Telegram message; set by
+                                # telegram_handler.py; used by add_expense as fallback date when
+                                # the user does not explicitly mention one
+    chart_bytes: bytes | None   # Set by end_trip via Command return after generating the pie
+                                # chart; read by telegram_handler.py after graph finishes to
+                                # send the chart as a Telegram photo; None on all other turns
 ```
 
 ### Checkpointing (Conversation Memory)
@@ -239,16 +249,16 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 
 ### 6. `end_trip`
 - **Input:** _(none beyond user_id)_
-- **Action (in order):**
-  1. Calls `get_all_expenses` to fetch everything.
-  2. Calls `get_sgd_exchange_rates()` to get current FX rates.
-  3. Converts each expense to SGD using the fetched rates (`sgd_amount = amount / rates[currency]`; no conversion needed when `currency == "SGD"`).
-  4. Generates summary (totals by category, grand total in SGD, per-expense table).
-  5. Generates matplotlib pie chart PNG in memory.
-  6. Deletes all `EXPENSE#*` items and the `TRIP#ACTIVE` item.
-  7. Deletes the LangGraph DynamoDB checkpoint for this `thread_id`.
-  8. Returns the summary text + chart image to the Telegram handler.
-- **Returns:** Summary dict containing `{ "text": "...", "chart_bytes": bytes }`.
+- **Human-in-the-loop:** The graph is compiled with `interrupt_before=["end_trip"]`. Before this tool executes, the agent must: (1) ask the user for explicit confirmation, (2) call `get_all_expenses` and present the trip summary. Only after the user confirms does the graph resume and call this tool.
+- **Action (in order, after interrupt resumes):**
+  1. Calls `get_sgd_exchange_rates()` to get current FX rates.
+  2. Converts each expense to SGD using the fetched rates (`sgd_amount = amount / rates[currency]`; no conversion needed when `currency == "SGD"`).
+  3. Generates summary text (totals by category, grand total in SGD, per-expense table).
+  4. Generates matplotlib pie chart PNG in memory.
+  5. Deletes all `EXPENSE#*` items and the `TRIP#ACTIVE` item.
+  6. Deletes the LangGraph DynamoDB checkpoint for this `thread_id`.
+  7. Returns the summary text + chart image to the Telegram handler.
+- **Returns:** A confirmation string to the LLM. Chart bytes are written to `AgentState.chart_bytes` via a `Command` return — `telegram_handler.py` reads this after the graph finishes and sends the chart as a separate Telegram photo message.
 
 ### 7. `get_sgd_exchange_rates`
 - **Input:** _(none)_

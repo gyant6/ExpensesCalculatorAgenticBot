@@ -9,18 +9,6 @@ from unittest.mock import patch
 TELEGRAM_USER_ID = "123456"
 
 
-@pytest.fixture
-def base_expense():
-    return {
-        "source_message": "Breakfast at Yakun $6.13",
-        "summary": "Breakfast at Yakun",
-        "category": "Food",
-        "amount": "6.13",
-        "currency": "SGD",
-        "date": "2023-12-20"
-    }
-
-
 def test_add_expense(dynamodb_table, base_expense):    
     with patch('src.bot.tools.expenses.datetime') as mock_dt:       
         mock_dt.now.return_value = datetime(2023, 12, 20, 13, 45, 50, 123456, tzinfo=timezone.utc)

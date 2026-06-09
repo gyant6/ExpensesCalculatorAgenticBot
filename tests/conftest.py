@@ -28,4 +28,15 @@ def dynamodb_table(monkeypatch):
             BillingMode='PAY_PER_REQUEST'
         )
         yield client
-    
+
+
+@pytest.fixture(scope="function")
+def base_expense():
+    return {
+        "source_message": "Breakfast at Yakun $6.13",
+        "summary": "Breakfast at Yakun",
+        "category": "Food",
+        "amount": "6.13",
+        "currency": "SGD",
+        "date": "2023-12-20"
+    }
