@@ -250,6 +250,156 @@ def test_edit_expense_date_change_reorders_list(dynamodb_table, base_expense):
     assert items_after_edit[1].get("date") == new_date
 
 
+def test_edit_expense_no_optional_fields(dynamodb_table):
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1,
+        "edit_message": "Unit test",
+        "summary": "Unit test"
+    })
+    
+    assert tool_output == "At least one of category, amount, currency, date, or payment_method must be provided."
+
+
+def test_edit_expense_no_items(dynamodb_table):
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "category": "Unit test"
+    })
+    
+    assert tool_output == "There are no items to edit. Add an expense to be tracked first."
+
+
+def test_edit_expense_expense_num_too_low(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        **base_expense
+    })
+    
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": -1,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "category": "Unit test"
+    })
+
+    tool_output2 = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 0,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "category": "Unit test"
+    })
+    
+    assert tool_output == "Invalid expense number. Use the numbered list from get_all_expenses."
+    assert tool_output2 == "Invalid expense number. Use the numbered list from get_all_expenses."
+
+
+def test_edit_expense_expense_num_too_high(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        **base_expense
+    })
+    
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 2,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "category": "Unit test"
+    })
+    
+    assert tool_output == "Invalid expense number. Use the numbered list from get_all_expenses."
+
+
+def test_edit_expense_invalid_category(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        **base_expense
+    })
+    
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "category": "Unit test"
+    })
+    
+    assert tool_output == "category should be one of ['Accommodation', 'Car Rental', 'Flight', 'Food', 'Insurance', 'Leisure', 'Misc', 'Shopping', 'Transport']"
+
+
+def test_edit_expense_zero_and_negative_amount(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        **base_expense
+    })
+    
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "amount": "0"
+    })
+    
+    tool_output2 = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "amount": "-1"
+    })
+    
+    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
+    assert tool_output2 == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
+
+
+def test_edit_expense_non_numeric_amount(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        **base_expense
+    })
+    
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "amount": "Unit test"
+    })
+    
+    assert tool_output == "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
+
+
+def test_edit_expense_invalid_date_format(dynamodb_table, base_expense):
+    dynamodb.put_item({
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "EXPENSE#1",
+        **base_expense
+    })
+    
+    tool_output = expenses.edit_expense.invoke({
+        "telegram_user_id": TELEGRAM_USER_ID,
+        "expense_num": 1,
+        "edit_message": "Unit test",
+        "summary": "Unit test",
+        "date": "Unit test"
+    })
+    
+    assert tool_output == "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
+
+
+
 def test_get_all_expenses_no_expenses(dynamodb_table):
     tool_output = expenses.get_all_expenses.invoke({
         "telegram_user_id": TELEGRAM_USER_ID
