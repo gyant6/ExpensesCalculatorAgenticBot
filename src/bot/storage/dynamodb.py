@@ -89,6 +89,45 @@ def put_item(item: dict) -> None:
     )
 
 
+def transact_write_delete_put(pk: str, sk: str, item: dict) -> None:
+    """Atomically delete one item and put another in a single DynamoDB transaction.
+
+    Used when an expense's SK must change (i.e. date edit), where the old item must
+    be deleted and a new item written under the new SK. Both operations succeed or
+    both are rolled back — the expense is never left in a partially updated state.
+
+    Args:
+        pk: Partition key of the item to delete (e.g. 'USER#123456789').
+        sk: Sort key of the item to delete (e.g. 'EXPENSE#2026-06-04T14:32:05.123456+00:00').
+        item: The full new item to write as a plain Python dict. Must include PK and SK.
+                All values must be Python-native types — serialisation is handled internally.
+
+    Raises:
+        botocore.exceptions.ClientError: If the DynamoDB transaction fails.
+            If the item to delete does not exist, DynamoDB will still succeed — no
+            condition check is applied on the delete.
+    """
+    get_client().transact_write_items(
+        TransactItems=[
+            {
+                'Delete': {
+                    'TableName': settings.DYNAMODB_TABLE_NAME,
+                    'Key': {
+                        'PK': {'S': pk},
+                        'SK': {'S': sk}
+                    }
+                }
+            },
+            {
+                'Put': {
+                    'TableName': settings.DYNAMODB_TABLE_NAME,
+                    'Item': { k: serializer.serialize(v) for k, v in item.items() }
+                }
+            }
+        ]
+    )
+
+
 def get_item(pk: str, sk: str) -> dict | None:
     """Fetch a single item from DynamoDB by its primary key.
 

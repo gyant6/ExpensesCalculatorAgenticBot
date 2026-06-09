@@ -125,19 +125,13 @@ def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_i
 
     if not category and not amount and not currency and not date and not payment_method:
         return "At least one of category, amount, currency, date, or payment_method must be provided."
-        
-    items = dynamodb.query_by_prefix(f"USER#{telegram_user_id}", "EXPENSE#")
-    if not items:
-        return "There are no items to edit. Add an expense to be tracked first."
-    if expense_num < 1 or expense_num > len(items):
-        return "Invalid expense number. Use the numbered list from get_all_expenses."
     
-    current_item = items[expense_num-1]
-    
-    edited_fields = { 
-        "source_message": f"{current_item["source_message"]} | {edit_message}" ,
-        "summary": summary 
-    }
+    invalid_expense_str = "Invalid expense number. Use the numbered list from get_all_expenses."
+    if expense_num < 1:
+        return invalid_expense_str
+                
+    edited_fields = { "summary": summary }
+
     if category:
         if category not in CATEGORIES:
             return f"category should be one of {sorted(CATEGORIES)}"
@@ -151,9 +145,25 @@ def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_i
             
     if currency:
         edited_fields["currency"] = currency
-        
+
+    if date:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+            
+        except ValueError:
+            return "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
+
     if payment_method:
         edited_fields["payment_method"] = payment_method
+
+    items = dynamodb.query_by_prefix(f"USER#{telegram_user_id}", "EXPENSE#")
+    if not items:
+        return "There are no items to edit. Add an expense to be tracked first."
+    if expense_num > len(items):
+        return invalid_expense_str
+    
+    current_item = items[expense_num-1]
+    edited_fields["source_message"] = f"{current_item["source_message"]} | {edit_message}"
         
     update_datetime = datetime.now(timezone.utc)
     if not date:
@@ -163,24 +173,19 @@ def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_i
             {"updated_at": update_datetime.isoformat(timespec='microseconds'), **edited_fields}
         )
     else:
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-            
-        except ValueError:
-            return "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
-        
         edited_fields["date"] = date
         new_date = date + update_datetime.isoformat(timespec='microseconds')[10:]  # append THH:MM:SS.ffffff+HH:MM from edit timestamp for uniqueness
 
-        dynamodb.delete_item(current_item["PK"], current_item["SK"])
-        
-        dynamodb.put_item({
-            **current_item,
-            "SK": f"EXPENSE#{new_date}",
-            "updated_at": update_datetime.isoformat(timespec='microseconds'),
-            **edited_fields
-        })
-
+        dynamodb.transact_write_delete_put(
+            current_item["PK"], 
+            current_item["SK"],
+            {
+                **current_item,
+                "SK": f"EXPENSE#{new_date}",
+                "updated_at": update_datetime.isoformat(timespec='microseconds'),
+                **edited_fields
+            }
+        )
 
     return "Edit expense successful."
 

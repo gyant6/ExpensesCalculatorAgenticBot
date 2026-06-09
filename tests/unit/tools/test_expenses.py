@@ -267,7 +267,7 @@ def test_edit_expense_no_items(dynamodb_table):
         "expense_num": 1,
         "edit_message": "Unit test",
         "summary": "Unit test",
-        "category": "Unit test"
+        "category": "Flight"
     })
     
     assert tool_output == "There are no items to edit. Add an expense to be tracked first."
@@ -312,7 +312,7 @@ def test_edit_expense_expense_num_too_high(dynamodb_table, base_expense):
         "expense_num": 2,
         "edit_message": "Unit test",
         "summary": "Unit test",
-        "category": "Unit test"
+        "category": "Flight"
     })
     
     assert tool_output == "Invalid expense number. Use the numbered list from get_all_expenses."

@@ -57,6 +57,28 @@ def test_put_item(dynamodb_table):
     assert item == dynamodb.get_item(item["PK"], item["SK"])
 
 
+def test_transact_write_delete_put_deletes_old_and_creates_new(dynamodb_table):
+    item1 = {
+        "PK": "USER#00000000",
+        "SK": "EXPENSE#1",
+        "summary": "Lunch at Sushi Tei",
+        "category": "Food",
+        "amount": "1.00",
+        "currency": "SGD",
+        "date": "2020-12-31",
+        "payment_method": "Cash",
+        "source_message": "Lunch at Sushi Tei $1"
+    }
+    
+    dynamodb.put_item(item1)
+    
+    item2 = {**item1, "SK": "EXPENSE#2"}
+    
+    dynamodb.transact_write_delete_put(item1["PK"], item1["SK"], item2)
+    assert dynamodb.get_item(item1["PK"], item1["SK"]) is None
+    assert item2 == dynamodb.get_item(item2["PK"], item2["SK"])
+
+
 def test_get_item_returns_none_when_not_found(dynamodb_table):
     item = dynamodb.get_item("Unknown", "Unknown")
     assert item is None
