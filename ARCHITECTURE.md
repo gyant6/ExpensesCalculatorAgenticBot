@@ -192,7 +192,7 @@ class AgentState(MessagesState):
 | Attribute | Type | Example |
 |---|---|---|
 | `PK` | String | `USER#123456789` |
-| `SK` | String | `EXPENSE#2026-06-04T14:32:05.123456` |
+| `SK` | String | `EXPENSE#2026-06-04T14:32:05.123456+00:00` |
 | `date` | String (ISO-8601) | `2026-06-04` |
 | `raw` | String | `1200 yen at Ichiran ramen for dinner` |
 | `category` | String | `Food & Dining` |
@@ -200,7 +200,7 @@ class AgentState(MessagesState):
 | `amount` | Decimal | `1200` |
 | `merchant` | String | `Ichiran` |
 | `summary` | String | `Dinner at Ichiran ramen` |
-| `updated_at` | String (ISO-8601) | `2026-06-04T13:45:00Z` |
+| `updated_at` | String (ISO-8601) | `2026-06-04T13:45:00.000000+00:00` |
 
 **Local vs prod switch:** Set `DYNAMODB_ENDPOINT_URL=http://localhost:8000` in local `.env`. Unset (or absent) in prod — boto3 connects to real DynamoDB automatically.
 
