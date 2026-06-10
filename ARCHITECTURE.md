@@ -130,6 +130,55 @@ The only code difference between local and prod is configuration — no business
 
 ---
 
+## Authentication
+
+Two independent layers, both required in production.
+
+### Layer A — Webhook origin verification (API Gateway, prod only)
+
+Defense-in-depth: both controls must be in place.
+
+**1. Resource policy — IP allowlist**
+API Gateway resource policy restricts inbound requests to Telegram's published server IP ranges ([cidr.txt](https://core.telegram.org/resources/cidr.txt)). Requests from any other IP are rejected at the gateway before Lambda is invoked — zero Lambda cost for non-Telegram traffic. The CIDR list must be kept in sync with Telegram's published ranges whenever they change.
+
+**2. Webhook secret token — header validation**
+When registering the webhook with Telegram (`setWebhook`), set the `secret_token` parameter. Telegram includes `X-Telegram-Bot-Api-Secret-Token: <your_secret>` on every webhook POST. The Lambda handler validates this header before processing the request. This proves the request is a legitimate webhook from your specific bot, not just any traffic originating from a Telegram IP.
+
+IP allowlist alone is insufficient because it does not prove the request is for your bot. Secret token alone is insufficient because a stolen token could be replayed from any IP. Together they provide defence in depth.
+
+The secret token is stored in AWS SSM Parameter Store (SecureString) and loaded via `config.py` at Lambda startup.
+
+**Keeping the IP allowlist in sync — automated CIDR updater**
+
+Telegram's published IP ranges change over time. The allowlist is kept current by a dedicated Lambda triggered by an EventBridge scheduled rule (weekly cadence — more responsive than monthly while remaining essentially free).
+
+```
+EventBridge (weekly schedule)
+        │
+        ▼
+cidr-updater Lambda
+        │
+        ├── GET https://core.telegram.org/resources/cidr.txt
+        │         (parse IPv4 + IPv6 CIDR ranges)
+        │
+        └── apigateway:UpdateRestApiPolicy
+                  (replace resource policy on the webhook API)
+```
+
+Design constraints:
+- **Failure safety:** if the GET fails or returns unparseable content, the Lambda raises an exception and leaves the existing policy unchanged — it never partially updates.
+- **Resource policy size limit:** API Gateway resource policies have a documented size limit (check AWS docs before deploying — Telegram's CIDR list has been growing).
+- **IAM scope:** the Lambda execution role grants `apigateway:UpdateRestApiPolicy` scoped to the specific webhook API ARN only.
+- **Structured logging:** logs the full new policy document on every successful update so changes are auditable in CloudWatch.
+
+### Layer B — User allowlist (telegram_handler.py, local and prod)
+
+`telegram_handler.py` checks the `telegram_user_id` from the incoming update against `ALLOWED_TELEGRAM_IDS` (a comma-separated list in the environment / SSM) before invoking the agent. Unauthorized users receive no response and no Lambda compute is wasted on the agent graph.
+
+This check must be the first operation in the handler, before any DynamoDB or Bedrock calls.
+
+---
+
 ## LangGraph Agent Design
 
 ### Graph Structure
@@ -529,10 +578,15 @@ dev = [
 ### Phase 2 — AWS Deployment
 - [ ] Lambda handler (`main.py` webhook mode)
 - [ ] API Gateway setup (POST /webhook)
-- [ ] Register Telegram webhook URL with BotFather
+- [ ] API Gateway resource policy: IP allowlist from Telegram's CIDR ranges
+- [ ] API Gateway webhook secret token (`X-Telegram-Bot-Api-Secret-Token`) validation in handler
+- [ ] User allowlist (`ALLOWED_TELEGRAM_IDS`) check in `telegram_handler.py`
+- [ ] Register Telegram webhook URL with BotFather (set `secret_token` at registration time)
 - [ ] IAM role with least-privilege DynamoDB + Bedrock permissions
 - [ ] Lambda packaging via `uv export --no-dev` + zip or container image
 - [ ] Environment variables in Lambda (no `.env` file — use SSM Parameter Store or Lambda env vars)
+- [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps API Gateway IP allowlist in sync with Telegram's published ranges)
+- [ ] IAM role for CIDR updater Lambda scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
 - [ ] CloudWatch structured logging validation
 
 ### Phase 3 — Enhancements (future)
