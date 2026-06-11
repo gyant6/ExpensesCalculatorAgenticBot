@@ -1,13 +1,22 @@
+from __future__ import annotations
+
+from collections.abc import Generator
+from typing import TYPE_CHECKING, Any
+
 import boto3
 import pytest
+from moto import mock_aws
 
 from src.bot.config import settings
 
-from moto import mock_aws
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb import DynamoDBClient
 
 
 @pytest.fixture(scope="function")
-def dynamodb_table(monkeypatch):
+def dynamodb_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[DynamoDBClient, None, None]:
     monkeypatch.setattr(settings, "DYNAMODB_ENDPOINT_URL", None)
     with mock_aws():
         client = boto3.client(
@@ -31,7 +40,7 @@ def dynamodb_table(monkeypatch):
 
 
 @pytest.fixture(scope="function")
-def base_expense():
+def base_expense() -> dict[str, Any]:
     return {
         "source_message": "Breakfast at Yakun $6.13",
         "summary": "Breakfast at Yakun",

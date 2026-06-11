@@ -1,14 +1,13 @@
 import httpx
 import pytest
 import respx
+from httpx import Response
 
 from src.bot.tools.fx import get_sgd_exchange_rates
 
-from httpx import Response
-
 
 @respx.mock
-async def test_get_sgd_exchange_rates_sucessful():
+async def test_get_sgd_exchange_rates_sucessful() -> None:
     query_parameters = {"base": "SGD"}
     fx_url = "https://api.fxratesapi.com/latest"
     mock_rate = {"JPY": 124.1}
@@ -21,7 +20,7 @@ async def test_get_sgd_exchange_rates_sucessful():
 
 
 @respx.mock
-async def test_get_sgd_exchange_rates_raises_on_http_error():
+async def test_get_sgd_exchange_rates_raises_on_http_error() -> None:
     query_parameters = {"base": "SGD"}
     fx_url = "https://api.fxratesapi.com/latest"
     respx.get(fx_url, params=query_parameters).mock(return_value=Response(500))
@@ -31,7 +30,7 @@ async def test_get_sgd_exchange_rates_raises_on_http_error():
 
 
 @respx.mock
-async def test_get_sgd_exchange_rates_raises_on_unsuccessful_response():
+async def test_get_sgd_exchange_rates_raises_on_unsuccessful_response() -> None:
     query_parameters = {"base": "SGD"}
     fx_url = "https://api.fxratesapi.com/latest"
     respx.get(fx_url, params=query_parameters).mock(

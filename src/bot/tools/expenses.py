@@ -1,10 +1,13 @@
-from src.bot.storage import dynamodb
+"""LangChain tools for recording, editing, deleting, and listing travel expenses."""
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from typing import Annotated
+
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
-from typing import Annotated
+
+from src.bot.storage import dynamodb
 
 CATEGORIES = {
     "Food",
@@ -112,11 +115,11 @@ def edit_expense(
     expense_num: int,
     edit_message: str,
     summary: str,
-    category: str = None,
-    amount: str = None,
-    currency: str = None,
-    date: str = None,
-    payment_method: str = None,
+    category: str | None = None,
+    amount: str | None = None,
+    currency: str | None = None,
+    date: str | None = None,
+    payment_method: str | None = None,
 ) -> str:
     """Edit one or more fields of an existing expense.
 

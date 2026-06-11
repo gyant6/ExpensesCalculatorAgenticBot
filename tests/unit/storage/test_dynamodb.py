@@ -1,11 +1,17 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pytest
+from botocore.exceptions import ClientError
 
 from src.bot.storage import dynamodb
 
-from botocore.exceptions import ClientError
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb import DynamoDBClient
 
 
-def test_update_item_updates_existing_item(dynamodb_table):
+def test_update_item_updates_existing_item(dynamodb_table: DynamoDBClient) -> None:
     item = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -27,19 +33,19 @@ def test_update_item_updates_existing_item(dynamodb_table):
     assert item | update == updated_item
 
 
-def test_update_item_raises_on_nonexistent_item(dynamodb_table):
+def test_update_item_raises_on_nonexistent_item(dynamodb_table: DynamoDBClient) -> None:
     with pytest.raises(ClientError) as exc_info:
         dynamodb.update_item("unknown", "unknown", {"unknown": "unknown"})
 
     assert exc_info.value.response["Error"]["Code"] == "ConditionalCheckFailedException"
 
 
-def test_update_item_raises_on_empty_fields():
+def test_update_item_raises_on_empty_fields() -> None:
     with pytest.raises(ValueError):
         dynamodb.update_item("unknown", "unknown", {})
 
 
-def test_put_item(dynamodb_table):
+def test_put_item(dynamodb_table: DynamoDBClient) -> None:
     item = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -57,7 +63,9 @@ def test_put_item(dynamodb_table):
     assert item == dynamodb.get_item(item["PK"], item["SK"])
 
 
-def test_transact_write_delete_put_deletes_old_and_creates_new(dynamodb_table):
+def test_transact_write_delete_put_deletes_old_and_creates_new(
+    dynamodb_table: DynamoDBClient,
+) -> None:
     item1 = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -79,12 +87,12 @@ def test_transact_write_delete_put_deletes_old_and_creates_new(dynamodb_table):
     assert item2 == dynamodb.get_item(item2["PK"], item2["SK"])
 
 
-def test_get_item_returns_none_when_not_found(dynamodb_table):
+def test_get_item_returns_none_when_not_found(dynamodb_table: DynamoDBClient) -> None:
     item = dynamodb.get_item("Unknown", "Unknown")
     assert item is None
 
 
-def test_get_item_returns_item_when_found(dynamodb_table):
+def test_get_item_returns_item_when_found(dynamodb_table: DynamoDBClient) -> None:
     item = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -100,7 +108,7 @@ def test_get_item_returns_item_when_found(dynamodb_table):
     assert item == dynamodb.get_item(item["PK"], item["SK"])
 
 
-def test_delete_existing_item(dynamodb_table):
+def test_delete_existing_item(dynamodb_table: DynamoDBClient) -> None:
     item = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -117,11 +125,11 @@ def test_delete_existing_item(dynamodb_table):
     assert dynamodb.get_item(item["PK"], item["SK"]) is None
 
 
-def test_delete_nonexistent_item(dynamodb_table):
+def test_delete_nonexistent_item(dynamodb_table: DynamoDBClient) -> None:
     dynamodb.delete_item("Unknown", "Unknown")
 
 
-def test_query_by_prefix_returns_empty_list(dynamodb_table):
+def test_query_by_prefix_returns_empty_list(dynamodb_table: DynamoDBClient) -> None:
     item = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -137,7 +145,7 @@ def test_query_by_prefix_returns_empty_list(dynamodb_table):
     assert dynamodb.query_by_prefix(item["PK"], "EXPENSE#") == []
 
 
-def test_query_by_prefix_returns_single_item(dynamodb_table):
+def test_query_by_prefix_returns_single_item(dynamodb_table: DynamoDBClient) -> None:
     item = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -154,7 +162,7 @@ def test_query_by_prefix_returns_single_item(dynamodb_table):
     assert dynamodb.query_by_prefix(item["PK"], "EXPENSE#") == [item]
 
 
-def test_query_by_prefix_returns_multiple_items(dynamodb_table):
+def test_query_by_prefix_returns_multiple_items(dynamodb_table: DynamoDBClient) -> None:
     item1 = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",
@@ -186,7 +194,9 @@ def test_query_by_prefix_returns_multiple_items(dynamodb_table):
     )
 
 
-def test_query_by_prefix_returns_only_matching_items(dynamodb_table):
+def test_query_by_prefix_returns_only_matching_items(
+    dynamodb_table: DynamoDBClient,
+) -> None:
     expense = {
         "PK": "USER#00000000",
         "SK": "EXPENSE#1",

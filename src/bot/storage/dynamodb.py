@@ -5,18 +5,23 @@ dicts using TypeDeserializer. The table name and endpoint are read from
 application settings so the same code works against DynamoDB Local and real AWS.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import boto3
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
 from src.bot.config import settings
 
-from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
-
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb import DynamoDBClient
 
 deserializer = TypeDeserializer()
 serializer = TypeSerializer()
 
 
-def get_client():
+def get_client() -> DynamoDBClient:
     """Create and return a boto3 DynamoDB client configured from application settings.
 
     Returns a new client on each call so that the mock context is respected in tests.
@@ -33,7 +38,7 @@ def get_client():
     )
 
 
-def update_item(pk: str, sk: str, fields: dict) -> None:
+def update_item(pk: str, sk: str, fields: dict[str, Any]) -> None:
     """Update specific attributes of an existing DynamoDB item without overwriting the whole item.
 
     Builds a SET UpdateExpression dynamically from the provided fields dict. Only the
@@ -69,7 +74,7 @@ def update_item(pk: str, sk: str, fields: dict) -> None:
     )
 
 
-def put_item(item: dict) -> None:
+def put_item(item: dict[str, Any]) -> None:
     """Write an item to the DynamoDB table, overwriting any existing item at the same key.
 
     Args:
@@ -84,7 +89,7 @@ def put_item(item: dict) -> None:
     get_client().put_item(TableName=settings.DYNAMODB_TABLE_NAME, Item=low_level_data)
 
 
-def transact_write_delete_put(pk: str, sk: str, item: dict) -> None:
+def transact_write_delete_put(pk: str, sk: str, item: dict[str, Any]) -> None:
     """Atomically delete one item and put another in a single DynamoDB transaction.
 
     Used when an expense's SK must change (i.e. date edit), where the old item must
@@ -120,7 +125,7 @@ def transact_write_delete_put(pk: str, sk: str, item: dict) -> None:
     )
 
 
-def get_item(pk: str, sk: str) -> dict | None:
+def get_item(pk: str, sk: str) -> dict[str, Any] | None:
     """Fetch a single item from DynamoDB by its primary key.
 
     Args:
@@ -161,7 +166,7 @@ def delete_item(pk: str, sk: str) -> None:
     )
 
 
-def query_by_prefix(pk: str, prefix: str) -> list[dict]:
+def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
     """Fetch all items for a partition key whose sort key starts with a given prefix.
 
     Used to retrieve all expenses for a user (prefix='EXPENSE#') or to check
