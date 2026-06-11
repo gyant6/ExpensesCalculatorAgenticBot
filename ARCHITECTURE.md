@@ -362,7 +362,7 @@ Started: 4 Jun 2026 | All amounts in SGD
 *Grand Total: SGD 379.00*
 
 *AI Analysis*
-Your largest spending category was Accommodation (55%). 
+Your largest spending category was Accommodation (55%).
 You spent an average of SGD 54.14/day...
 [etc]
 
@@ -575,7 +575,96 @@ dev = [
 - [ ] Manual end-to-end testing via Telegram
 - [ ] LangSmith project setup; build initial eval datasets; run first eval baseline
 
-### Phase 2 — AWS Deployment
+### Phase 2 — CI/CD (GitHub Actions)
+
+**Philosophy:** GitHub Actions is the CI/CD platform for this project. Concepts (pipelines, secrets management, environment promotion, deploy gates, OIDC credential federation) transfer directly to Jenkins or AWS CodePipeline — without the overhead of maintaining a CI server.
+
+#### Workflows
+
+```
+.github/
+└── workflows/
+    ├── test.yml       # runs on every push/PR: unit tests + coverage gate
+    └── deploy.yml     # runs on merge to main: package Lambda + deploy to prod
+```
+
+#### `test.yml` — Unit tests on every push
+
+```
+push / pull_request
+        │
+        ▼
+  ubuntu-latest runner
+        │
+        ├── checkout code
+        ├── install uv
+        ├── uv sync --frozen
+        └── pytest tests/unit/ --cov --cov-fail-under=80
+```
+
+- No AWS credentials needed — moto intercepts all boto3 calls in-process
+- Fails the PR if coverage drops below 80%
+- Runs on every push and every PR (including forks via `pull_request` trigger)
+
+#### `deploy.yml` — Deploy to Lambda on merge to main
+
+```
+push to main (after test.yml passes)
+        │
+        ▼
+  ubuntu-latest runner
+        │
+        ├── checkout code
+        ├── install uv
+        ├── uv export --no-dev -o requirements.txt
+        ├── pip install -r requirements.txt --target package/
+        ├── zip -r function.zip package/ src/
+        └── aws lambda update-function-code --zip-file fileb://function.zip
+```
+
+**AWS credential federation via OIDC (no long-lived keys):**
+- GitHub Actions authenticates to AWS using OIDC — no `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` stored in GitHub secrets
+- AWS IAM identity provider trusts `token.actions.githubusercontent.com`
+- A deploy IAM role is assumed via `aws-actions/configure-aws-credentials`; scoped to `lambda:UpdateFunctionCode` + SSM read only
+- The role trust policy restricts assumption to this specific repo and branch (`repo:owner/repo:ref:refs/heads/main`)
+
+#### Secrets & environment variables
+
+| Secret | Where stored | How accessed in Actions |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | AWS SSM Parameter Store | Lambda reads at startup via `config.py`; not in GitHub |
+| AWS deploy role ARN | GitHub Actions secret (`AWS_DEPLOY_ROLE_ARN`) | Used by `configure-aws-credentials` step |
+| LangSmith API key | GitHub Actions secret | Only present in eval workflow (future) |
+
+No `.env` files in CI. No long-lived AWS keys anywhere.
+
+#### Pre-commit hooks
+
+Configured via `.pre-commit-config.yaml` (committed to repo). Run `pre-commit install` once after cloning to activate.
+
+| Hook | What it catches |
+|---|---|
+| `ruff check --fix` | Lint errors, unused imports, undefined names |
+| `ruff format` | Formatting inconsistencies |
+| `mypy src/` | Type errors, missing annotations |
+
+Run manually against all files:
+```bash
+uv run pre-commit run --all-files
+```
+
+#### Roadmap items
+
+- [ ] `.pre-commit-config.yaml`: ruff (lint + format) + mypy
+- [ ] GitHub Actions `test.yml`: unit tests + coverage gate on every push/PR
+- [ ] GitHub Actions `deploy.yml`: OIDC credential federation, Lambda packaging, deploy on merge to main
+- [ ] IAM OIDC identity provider configured in AWS account
+- [ ] Deploy IAM role with trust policy scoped to this repo + main branch
+- [ ] Manual approval gate before prod deploy (GitHub Actions environment protection rule)
+
+---
+
+### Phase 3 — AWS Deployment
 - [ ] Lambda handler (`main.py` webhook mode)
 - [ ] API Gateway setup (POST /webhook)
 - [ ] API Gateway resource policy: IP allowlist from Telegram's CIDR ranges
@@ -589,7 +678,7 @@ dev = [
 - [ ] IAM role for CIDR updater Lambda scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
 - [ ] CloudWatch structured logging validation
 
-### Phase 3 — Enhancements (future)
+### Phase 4 — Enhancements (future)
 - [ ] Receipt image parsing (user sends photo, agent extracts expense via vision)
 - [ ] Budget alerts (warn user when spending exceeds a threshold)
 - [ ] FX rate caching per day (avoid redundant API calls for same currency on same day)
