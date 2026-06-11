@@ -13,19 +13,19 @@ def dynamodb_table(monkeypatch):
         client = boto3.client(
             "dynamodb",
             endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
-            region_name=settings.AWS_REGION
+            region_name=settings.AWS_REGION,
         )
         client.create_table(
             TableName=settings.DYNAMODB_TABLE_NAME,
             KeySchema=[
-                {'AttributeName': 'PK', 'KeyType': 'HASH'},
-                {'AttributeName': 'SK', 'KeyType': 'RANGE'}
+                {"AttributeName": "PK", "KeyType": "HASH"},
+                {"AttributeName": "SK", "KeyType": "RANGE"},
             ],
             AttributeDefinitions=[
-                {'AttributeName': 'PK', 'AttributeType': 'S'},
-                {'AttributeName': 'SK', 'AttributeType': 'S'}
+                {"AttributeName": "PK", "AttributeType": "S"},
+                {"AttributeName": "SK", "AttributeType": "S"},
             ],
-            BillingMode='PAY_PER_REQUEST'
+            BillingMode="PAY_PER_REQUEST",
         )
         yield client
 
@@ -38,5 +38,5 @@ def base_expense():
         "category": "Food",
         "amount": "6.13",
         "currency": "SGD",
-        "date": "2023-12-20"
+        "date": "2023-12-20",
     }

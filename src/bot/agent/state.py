@@ -6,4 +6,3 @@ class AgentState(MessagesState):
     message_date: str
     pie_chart_bytes: bytes | None = None
     bar_chart_bytes: bytes | None = None
-    

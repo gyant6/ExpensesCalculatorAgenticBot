@@ -27,12 +27,12 @@ def get_client():
         A boto3 DynamoDB client.
     """
     return boto3.client(
-        'dynamodb', 
+        "dynamodb",
         endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
-        region_name = settings.AWS_REGION
+        region_name=settings.AWS_REGION,
     )
-    
-    
+
+
 def update_item(pk: str, sk: str, fields: dict) -> None:
     """Update specific attributes of an existing DynamoDB item without overwriting the whole item.
 
@@ -52,22 +52,20 @@ def update_item(pk: str, sk: str, fields: dict) -> None:
     """
     if not fields:
         raise ValueError("fields must not be empty")
-    
-    update_exp_str = "SET" + ",".join([f" #{field} = :{field}" for field in fields.keys()])
-    exp_attr_names = { f"#{field}": f"{field}" for field in fields.keys()}
-    exp_attr_values = { f":{k}": serializer.serialize(v) for k, v in fields.items()}
-    
-    
+
+    update_exp_str = "SET" + ",".join(
+        [f" #{field} = :{field}" for field in fields.keys()]
+    )
+    exp_attr_names = {f"#{field}": f"{field}" for field in fields.keys()}
+    exp_attr_values = {f":{k}": serializer.serialize(v) for k, v in fields.items()}
+
     get_client().update_item(
         TableName=settings.DYNAMODB_TABLE_NAME,
-        Key={
-            'PK': {'S': pk},
-            'SK': {'S': sk}
-        },
+        Key={"PK": {"S": pk}, "SK": {"S": sk}},
         UpdateExpression=update_exp_str,
         ExpressionAttributeNames=exp_attr_names,
         ExpressionAttributeValues=exp_attr_values,
-        ConditionExpression="attribute_exists(PK)"
+        ConditionExpression="attribute_exists(PK)",
     )
 
 
@@ -82,11 +80,8 @@ def put_item(item: dict) -> None:
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    low_level_data = { k: serializer.serialize(v) for k, v in item.items() }
-    get_client().put_item(
-        TableName=settings.DYNAMODB_TABLE_NAME,
-        Item=low_level_data
-    )
+    low_level_data = {k: serializer.serialize(v) for k, v in item.items()}
+    get_client().put_item(TableName=settings.DYNAMODB_TABLE_NAME, Item=low_level_data)
 
 
 def transact_write_delete_put(pk: str, sk: str, item: dict) -> None:
@@ -110,20 +105,17 @@ def transact_write_delete_put(pk: str, sk: str, item: dict) -> None:
     get_client().transact_write_items(
         TransactItems=[
             {
-                'Delete': {
-                    'TableName': settings.DYNAMODB_TABLE_NAME,
-                    'Key': {
-                        'PK': {'S': pk},
-                        'SK': {'S': sk}
-                    }
+                "Delete": {
+                    "TableName": settings.DYNAMODB_TABLE_NAME,
+                    "Key": {"PK": {"S": pk}, "SK": {"S": sk}},
                 }
             },
             {
-                'Put': {
-                    'TableName': settings.DYNAMODB_TABLE_NAME,
-                    'Item': { k: serializer.serialize(v) for k, v in item.items() }
+                "Put": {
+                    "TableName": settings.DYNAMODB_TABLE_NAME,
+                    "Item": {k: serializer.serialize(v) for k, v in item.items()},
                 }
-            }
+            },
         ]
     )
 
@@ -142,19 +134,15 @@ def get_item(pk: str, sk: str) -> dict | None:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     response = get_client().get_item(
-        TableName=settings.DYNAMODB_TABLE_NAME,
-        Key={
-            'PK': {'S': pk},
-            'SK': {'S': sk}
-        }
+        TableName=settings.DYNAMODB_TABLE_NAME, Key={"PK": {"S": pk}, "SK": {"S": sk}}
     )
-    
-    low_level_data = response.get('Item')
-    
+
+    low_level_data = response.get("Item")
+
     if low_level_data is not None:
-        items = { k: deserializer.deserialize(v) for k, v in low_level_data.items() }
+        items = {k: deserializer.deserialize(v) for k, v in low_level_data.items()}
         return items
-    
+
     return None
 
 
@@ -169,11 +157,7 @@ def delete_item(pk: str, sk: str) -> None:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     get_client().delete_item(
-        TableName=settings.DYNAMODB_TABLE_NAME,
-        Key={
-            'PK': {'S': pk},
-            'SK': {'S': sk}
-        }
+        TableName=settings.DYNAMODB_TABLE_NAME, Key={"PK": {"S": pk}, "SK": {"S": sk}}
     )
 
 
@@ -195,14 +179,14 @@ def query_by_prefix(pk: str, prefix: str) -> list[dict]:
     """
     response = get_client().query(
         TableName=settings.DYNAMODB_TABLE_NAME,
-        KeyConditionExpression='PK = :pk AND begins_with(SK, :prefix)',
-        ExpressionAttributeValues={
-            ':pk': {'S': pk},
-            ':prefix': {'S': prefix}
-        }
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues={":pk": {"S": pk}, ":prefix": {"S": prefix}},
     )
-    
-    low_level_data = response.get('Items', [])
 
-    items = [ { k: deserializer.deserialize(v) for k, v in item.items() } for item in low_level_data ]
+    low_level_data = response.get("Items", [])
+
+    items = [
+        {k: deserializer.deserialize(v) for k, v in item.items()}
+        for item in low_level_data
+    ]
     return items

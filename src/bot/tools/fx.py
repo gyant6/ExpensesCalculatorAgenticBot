@@ -1,5 +1,6 @@
 import httpx
 
+
 async def get_sgd_exchange_rates() -> dict:
     """Fetch live exchange rates from api.fxratesapi.com with SGD as the base currency.
 
@@ -11,9 +12,9 @@ async def get_sgd_exchange_rates() -> dict:
         httpx.HTTPStatusError: If the API returns a non-2xx HTTP status.
         RuntimeError: If the API returns a 2xx response but with success=false in the body.
     """
-    query_parameters = {'base': 'SGD'}
+    query_parameters = {"base": "SGD"}
     fx_url = "https://api.fxratesapi.com/latest"
-    
+
     async with httpx.AsyncClient() as client:
         response = await client.get(fx_url, params=query_parameters, timeout=2)
         response.raise_for_status()
