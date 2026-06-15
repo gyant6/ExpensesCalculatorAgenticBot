@@ -588,6 +588,8 @@ dev = [
 - [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps API Gateway IP allowlist in sync with Telegram's published ranges)
 - [ ] IAM role for CIDR updater Lambda scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
 - [ ] CloudWatch structured logging validation
+- [ ] Bedrock Guardrails — denied topics policy to block off-topic requests (financial advice, general chat, etc.) and keep the agent scoped to expense tracking
+- [ ] Bedrock Guardrails — prompt attack filter to detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
 
 ### Phase 3 — Enhancements (future)
 - [ ] Receipt image parsing (user sends photo, agent extracts expense via vision)
