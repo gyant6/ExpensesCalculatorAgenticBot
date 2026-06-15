@@ -5,18 +5,23 @@ dicts using TypeDeserializer. The table name and endpoint are read from
 application settings so the same code works against DynamoDB Local and real AWS.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import boto3
+from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 
 from src.bot.config import settings
 
-from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
-
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb import DynamoDBClient
 
 deserializer = TypeDeserializer()
 serializer = TypeSerializer()
 
 
-def get_client():
+def get_client() -> DynamoDBClient:
     """Create and return a boto3 DynamoDB client configured from application settings.
 
     Returns a new client on each call so that the mock context is respected in tests.
@@ -27,13 +32,13 @@ def get_client():
         A boto3 DynamoDB client.
     """
     return boto3.client(
-        'dynamodb', 
+        "dynamodb",
         endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
-        region_name = settings.AWS_REGION
+        region_name=settings.AWS_REGION,
     )
-    
-    
-def update_item(pk: str, sk: str, fields: dict) -> None:
+
+
+def update_item(pk: str, sk: str, fields: dict[str, Any]) -> None:
     """Update specific attributes of an existing DynamoDB item without overwriting the whole item.
 
     Builds a SET UpdateExpression dynamically from the provided fields dict. Only the
@@ -52,26 +57,24 @@ def update_item(pk: str, sk: str, fields: dict) -> None:
     """
     if not fields:
         raise ValueError("fields must not be empty")
-    
-    update_exp_str = "SET" + ",".join([f" #{field} = :{field}" for field in fields.keys()])
-    exp_attr_names = { f"#{field}": f"{field}" for field in fields.keys()}
-    exp_attr_values = { f":{k}": serializer.serialize(v) for k, v in fields.items()}
-    
-    
+
+    update_exp_str = "SET" + ",".join(
+        [f" #{field} = :{field}" for field in fields.keys()]
+    )
+    exp_attr_names = {f"#{field}": f"{field}" for field in fields.keys()}
+    exp_attr_values = {f":{k}": serializer.serialize(v) for k, v in fields.items()}
+
     get_client().update_item(
         TableName=settings.DYNAMODB_TABLE_NAME,
-        Key={
-            'PK': {'S': pk},
-            'SK': {'S': sk}
-        },
+        Key={"PK": {"S": pk}, "SK": {"S": sk}},
         UpdateExpression=update_exp_str,
         ExpressionAttributeNames=exp_attr_names,
         ExpressionAttributeValues=exp_attr_values,
-        ConditionExpression="attribute_exists(PK)"
+        ConditionExpression="attribute_exists(PK)",
     )
 
 
-def put_item(item: dict) -> None:
+def put_item(item: dict[str, Any]) -> None:
     """Write an item to the DynamoDB table, overwriting any existing item at the same key.
 
     Args:
@@ -82,14 +85,11 @@ def put_item(item: dict) -> None:
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    low_level_data = { k: serializer.serialize(v) for k, v in item.items() }
-    get_client().put_item(
-        TableName=settings.DYNAMODB_TABLE_NAME,
-        Item=low_level_data
-    )
+    low_level_data = {k: serializer.serialize(v) for k, v in item.items()}
+    get_client().put_item(TableName=settings.DYNAMODB_TABLE_NAME, Item=low_level_data)
 
 
-def transact_write_delete_put(pk: str, sk: str, item: dict) -> None:
+def transact_write_delete_put(pk: str, sk: str, item: dict[str, Any]) -> None:
     """Atomically delete one item and put another in a single DynamoDB transaction.
 
     Used when an expense's SK must change (i.e. date edit), where the old item must
@@ -110,25 +110,22 @@ def transact_write_delete_put(pk: str, sk: str, item: dict) -> None:
     get_client().transact_write_items(
         TransactItems=[
             {
-                'Delete': {
-                    'TableName': settings.DYNAMODB_TABLE_NAME,
-                    'Key': {
-                        'PK': {'S': pk},
-                        'SK': {'S': sk}
-                    }
+                "Delete": {
+                    "TableName": settings.DYNAMODB_TABLE_NAME,
+                    "Key": {"PK": {"S": pk}, "SK": {"S": sk}},
                 }
             },
             {
-                'Put': {
-                    'TableName': settings.DYNAMODB_TABLE_NAME,
-                    'Item': { k: serializer.serialize(v) for k, v in item.items() }
+                "Put": {
+                    "TableName": settings.DYNAMODB_TABLE_NAME,
+                    "Item": {k: serializer.serialize(v) for k, v in item.items()},
                 }
-            }
+            },
         ]
     )
 
 
-def get_item(pk: str, sk: str) -> dict | None:
+def get_item(pk: str, sk: str) -> dict[str, Any] | None:
     """Fetch a single item from DynamoDB by its primary key.
 
     Args:
@@ -142,19 +139,15 @@ def get_item(pk: str, sk: str) -> dict | None:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     response = get_client().get_item(
-        TableName=settings.DYNAMODB_TABLE_NAME,
-        Key={
-            'PK': {'S': pk},
-            'SK': {'S': sk}
-        }
+        TableName=settings.DYNAMODB_TABLE_NAME, Key={"PK": {"S": pk}, "SK": {"S": sk}}
     )
-    
-    low_level_data = response.get('Item')
-    
+
+    low_level_data = response.get("Item")
+
     if low_level_data is not None:
-        items = { k: deserializer.deserialize(v) for k, v in low_level_data.items() }
+        items = {k: deserializer.deserialize(v) for k, v in low_level_data.items()}
         return items
-    
+
     return None
 
 
@@ -169,15 +162,11 @@ def delete_item(pk: str, sk: str) -> None:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     get_client().delete_item(
-        TableName=settings.DYNAMODB_TABLE_NAME,
-        Key={
-            'PK': {'S': pk},
-            'SK': {'S': sk}
-        }
+        TableName=settings.DYNAMODB_TABLE_NAME, Key={"PK": {"S": pk}, "SK": {"S": sk}}
     )
 
 
-def query_by_prefix(pk: str, prefix: str) -> list[dict]:
+def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
     """Fetch all items for a partition key whose sort key starts with a given prefix.
 
     Used to retrieve all expenses for a user (prefix='EXPENSE#') or to check
@@ -195,14 +184,14 @@ def query_by_prefix(pk: str, prefix: str) -> list[dict]:
     """
     response = get_client().query(
         TableName=settings.DYNAMODB_TABLE_NAME,
-        KeyConditionExpression='PK = :pk AND begins_with(SK, :prefix)',
-        ExpressionAttributeValues={
-            ':pk': {'S': pk},
-            ':prefix': {'S': prefix}
-        }
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues={":pk": {"S": pk}, ":prefix": {"S": prefix}},
     )
-    
-    low_level_data = response.get('Items', [])
 
-    items = [ { k: deserializer.deserialize(v) for k, v in item.items() } for item in low_level_data ]
+    low_level_data = response.get("Items", [])
+
+    items = [
+        {k: deserializer.deserialize(v) for k, v in item.items()}
+        for item in low_level_data
+    ]
     return items

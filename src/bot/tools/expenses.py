@@ -1,14 +1,24 @@
-from src.bot.storage import dynamodb
+"""LangChain tools for recording, editing, deleting, and listing travel expenses."""
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from langchain_core.tools import tool
-from langgraph.prebuilt import InjectedState
 from typing import Annotated
 
+from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedState
+
+from src.bot.storage import dynamodb
+
 CATEGORIES = {
-    "Food", "Car Rental", "Transport", "Accommodation", 
-    "Shopping", "Flight", "Insurance", "Leisure", "Misc"
+    "Food",
+    "Car Rental",
+    "Transport",
+    "Accommodation",
+    "Shopping",
+    "Flight",
+    "Insurance",
+    "Leisure",
+    "Misc",
 }
 
 
@@ -23,7 +33,7 @@ def check_valid_amount(amount: str) -> bool:
     """
     try:
         amt = Decimal(amount)
-        if amt <= 0: 
+        if amt <= 0:
             return False
         return True
     except InvalidOperation:
@@ -31,8 +41,16 @@ def check_valid_amount(amount: str) -> bool:
 
 
 @tool
-def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")], source_message: str, summary: str, category: str, 
-                amount: str, currency: str, date: str, payment_method: str = "Cash") -> str:
+def add_expense(
+    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    source_message: str,
+    summary: str,
+    category: str,
+    amount: str,
+    currency: str,
+    date: str,
+    payment_method: str = "Cash",
+) -> str:
     """Record a new expense for the user in DynamoDB.
 
     Call this when the user describes an expense — e.g. "spent $12 on lunch", "paid 500 yen
@@ -43,8 +61,8 @@ def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id
     Args:
         source_message: The original message the user sent describing the expense.
         summary: Short human-readable description of the expense (e.g. 'Lunch at Sushi Tei').
-        category: Expense category which must be in one of 
-            "Food", "Car Rental", "Transport", "Accommodation", 
+        category: Expense category which must be in one of
+            "Food", "Car Rental", "Transport", "Accommodation",
             "Shopping", "Flight", "Insurance", "Leisure", "Misc".
         amount: Expense amount as a string (e.g. '12.50'). Must be a positive number.
         currency: ISO 4217 currency code (e.g. 'SGD', 'JPY', 'USD').
@@ -65,33 +83,44 @@ def add_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id
         datetime.strptime(date, "%Y-%m-%d")
     except ValueError:
         return "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
-    
+
     if not check_valid_amount(amount):
         return "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
-    
+
     if category not in CATEGORIES:
         return f"category should be one of {sorted(CATEGORIES)}"
-    
-    datetime_now = datetime.now(timezone.utc).isoformat(timespec='microseconds')
-    dynamodb.put_item({
-        "PK": f"USER#{telegram_user_id}",
-        "SK": f"EXPENSE#{datetime_now}",
-        "source_message": source_message,
-        "summary": summary,
-        "category": category,
-        "amount": amount,
-        "currency": currency,
-        "date": date,
-        "payment_method": payment_method,
-        "updated_at": datetime_now
-    })
-    
+
+    datetime_now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    dynamodb.put_item(
+        {
+            "PK": f"USER#{telegram_user_id}",
+            "SK": f"EXPENSE#{datetime_now}",
+            "source_message": source_message,
+            "summary": summary,
+            "category": category,
+            "amount": amount,
+            "currency": currency,
+            "date": date,
+            "payment_method": payment_method,
+            "updated_at": datetime_now,
+        }
+    )
+
     return "Expense recorded."
 
 
 @tool
-def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")], expense_num: int, edit_message: str,
-                 summary: str, category: str = None, amount: str = None, currency: str = None, date: str = None, payment_method: str = None) -> str:
+def edit_expense(
+    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    expense_num: int,
+    edit_message: str,
+    summary: str,
+    category: str | None = None,
+    amount: str | None = None,
+    currency: str | None = None,
+    date: str | None = None,
+    payment_method: str | None = None,
+) -> str:
     """Edit one or more fields of an existing expense.
 
     Call this when the user wants to correct or update a previously recorded expense —
@@ -125,31 +154,33 @@ def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_i
 
     if not category and not amount and not currency and not date and not payment_method:
         return "At least one of category, amount, currency, date, or payment_method must be provided."
-    
-    invalid_expense_str = "Invalid expense number. Use the numbered list from get_all_expenses."
+
+    invalid_expense_str = (
+        "Invalid expense number. Use the numbered list from get_all_expenses."
+    )
     if expense_num < 1:
         return invalid_expense_str
-                
-    edited_fields = { "summary": summary }
+
+    edited_fields = {"summary": summary}
 
     if category:
         if category not in CATEGORIES:
             return f"category should be one of {sorted(CATEGORIES)}"
         edited_fields["category"] = category
-        
+
     if amount:
         if not check_valid_amount(amount):
             return "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
         else:
             edited_fields["amount"] = amount
-            
+
     if currency:
         edited_fields["currency"] = currency
 
     if date:
         try:
             datetime.strptime(date, "%Y-%m-%d")
-            
+
         except ValueError:
             return "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
 
@@ -161,37 +192,47 @@ def edit_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_i
         return "There are no items to edit. Add an expense to be tracked first."
     if expense_num > len(items):
         return invalid_expense_str
-    
-    current_item = items[expense_num-1]
-    edited_fields["source_message"] = f"{current_item["source_message"]} | {edit_message}"
-        
+
+    current_item = items[expense_num - 1]
+    edited_fields["source_message"] = (
+        f"{current_item['source_message']} | {edit_message}"
+    )
+
     update_datetime = datetime.now(timezone.utc)
     if not date:
         dynamodb.update_item(
             current_item["PK"],
             current_item["SK"],
-            {"updated_at": update_datetime.isoformat(timespec='microseconds'), **edited_fields}
+            {
+                "updated_at": update_datetime.isoformat(timespec="microseconds"),
+                **edited_fields,
+            },
         )
     else:
         edited_fields["date"] = date
-        new_date = date + update_datetime.isoformat(timespec='microseconds')[10:]  # append THH:MM:SS.ffffff+HH:MM from edit timestamp for uniqueness
+        new_date = (
+            date + update_datetime.isoformat(timespec="microseconds")[10:]
+        )  # append THH:MM:SS.ffffff+HH:MM from edit timestamp for uniqueness
 
         dynamodb.transact_write_delete_put(
-            current_item["PK"], 
+            current_item["PK"],
             current_item["SK"],
             {
                 **current_item,
                 "SK": f"EXPENSE#{new_date}",
-                "updated_at": update_datetime.isoformat(timespec='microseconds'),
-                **edited_fields
-            }
+                "updated_at": update_datetime.isoformat(timespec="microseconds"),
+                **edited_fields,
+            },
         )
 
     return "Edit expense successful."
 
 
 @tool
-def delete_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")], expense_num: int) -> str:
+def delete_expense(
+    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    expense_num: int,
+) -> str:
     """Delete an existing expense by its list position.
 
     Call this when the user wants to remove a previously recorded expense —
@@ -207,7 +248,9 @@ def delete_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    invalid_expense_str = "Invalid expense number. Use the numbered list from get_all_expenses."
+    invalid_expense_str = (
+        "Invalid expense number. Use the numbered list from get_all_expenses."
+    )
     if expense_num < 1:
         return invalid_expense_str
 
@@ -217,14 +260,16 @@ def delete_expense(telegram_user_id: Annotated[str, InjectedState("telegram_user
         return "There are no items to delete. Add an expense to be tracked first."
     if expense_num > len(items):
         return invalid_expense_str
-    
-    item = items[expense_num-1]
+
+    item = items[expense_num - 1]
     dynamodb.delete_item(pk, item["SK"])
     return "Expense deleted."
 
 
 @tool
-def get_all_expenses(telegram_user_id: Annotated[str, InjectedState("telegram_user_id")]) -> str:
+def get_all_expenses(
+    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+) -> str:
     """Retrieve all recorded expenses for the user.
 
     Call this when the user asks to see their expenses, wants a summary of spending,
@@ -239,12 +284,12 @@ def get_all_expenses(telegram_user_id: Annotated[str, InjectedState("telegram_us
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     items = dynamodb.query_by_prefix(f"USER#{telegram_user_id}", "EXPENSE#")
-    
+
     if not items:
         return "There is currently no expenses recorded."
-    
+
     response = "summary | category | amount | date | payment_method"
     for i, expense in enumerate(items, start=1):
-        response += f"\n{i}. {expense["summary"]} | {expense["category"]} | {expense["amount"]} {expense["currency"]} | {expense["date"]} | {expense["payment_method"]}"
-        
+        response += f"\n{i}. {expense['summary']} | {expense['category']} | {expense['amount']} {expense['currency']} | {expense['date']} | {expense['payment_method']}"
+
     return response

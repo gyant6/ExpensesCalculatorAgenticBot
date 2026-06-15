@@ -15,7 +15,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "boto3-stubs[dynamodb]>=1.43.27",
     "moto[dynamodb]>=5.2.1",
+    "mypy>=2.1.0",
+    "pre-commit>=4.6.0",
+    "pydantic[mypy]>=2.13.4",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
@@ -24,3 +28,13 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+
+[tool.ruff.lint]
+    select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+files = ["src", "tests"]
+strict = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+explicit_package_bases = true

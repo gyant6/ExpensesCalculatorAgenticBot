@@ -1,6 +1,15 @@
-import httpx
+"""Fetches live SGD exchange rates from api.fxratesapi.com."""
 
-async def get_sgd_exchange_rates() -> dict:
+import httpx
+from pydantic import BaseModel
+
+
+class FxRatesResponse(BaseModel):
+    success: bool
+    rates: dict[str, float]
+
+
+async def get_sgd_exchange_rates() -> dict[str, float]:
     """Fetch live exchange rates from api.fxratesapi.com with SGD as the base currency.
 
     Returns:
@@ -10,14 +19,16 @@ async def get_sgd_exchange_rates() -> dict:
     Raises:
         httpx.HTTPStatusError: If the API returns a non-2xx HTTP status.
         RuntimeError: If the API returns a 2xx response but with success=false in the body.
+        pydantic.ValidationError: If the API response does not match the expected schema.
     """
-    query_parameters = {'base': 'SGD'}
+    query_parameters = {"base": "SGD"}
     fx_url = "https://api.fxratesapi.com/latest"
-    
+
     async with httpx.AsyncClient() as client:
         response = await client.get(fx_url, params=query_parameters, timeout=2)
         response.raise_for_status()
-        json_res = response.json()
-        if not json_res.get("success"):
+        json_res = FxRatesResponse.model_validate(response.json())
+
+        if not json_res.success:
             raise RuntimeError(f"Failed to fetch exchange rates: {json_res}")
-        return json_res["rates"]
+        return json_res.rates
