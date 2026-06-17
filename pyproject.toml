@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "boto3>=1.43.23",
     "httpx>=0.28.1",
+    "langchain-aws>=1.5.1",
     "langchain-core>=1.4.0",
     "langgraph>=1.2.4",
     "pydantic-settings>=2.14.1",

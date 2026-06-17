@@ -187,16 +187,19 @@ This check must be the first operation in the handler, before any DynamoDB or Be
 START
   │
   ▼
+[check_trip_status node]
+  │  (reads TRIP#ACTIVE from DynamoDB, sets trip_start_date in state)
+  ▼
 [agent node]  ◄─────────────────────┐
   │                                  │
-  │  (if tool_calls in response)     │
-  ▼                                  │
-[tools node]  ─── tool results ─────┘
-  │   ▲
-  │   │  interrupt_before=["end_trip"]:
-  │   │  graph pauses here, saves state to checkpointer,
-  │   │  returns control to telegram_handler.py which sends
-  │   │  confirmation prompt to user; resumes on next message
+  ├── if tool_calls in response ─►  [tools node]
+  │                                  │  interrupt_before=["end_trip"]:
+  │                                  │  graph pauses, saves state to checkpointer,
+  │                                  │  returns control to telegram_handler.py which
+  │                                  │  sends confirmation prompt to user; resumes
+  │                                  │  on next message
+  │                                  │
+  │                                ──┘ (tool results appended to messages)
   │
   │  (if no tool_calls — final response)
   ▼

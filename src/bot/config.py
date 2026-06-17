@@ -14,8 +14,9 @@ class Settings(BaseSettings):
 
     ENVIRONMENT: str
     TELEGRAM_BOT_TOKEN: str
-    AWS_REGION: str
+    AWS_BEDROCK_MODEL_ID: str
     AWS_BEDROCK_PROFILE: str | None = None
+    AWS_REGION: str
     LOG_LEVEL: str
     DYNAMODB_TABLE_NAME: str
     DYNAMODB_ENDPOINT_URL: str | None = None
