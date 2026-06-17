@@ -3,9 +3,11 @@
 from langgraph.graph import END, START
 from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph_checkpoint_aws import DynamoDBSaver
 
 from src.bot.agent.nodes import agent_node, check_trip_status, tools
 from src.bot.agent.state import AgentState
+from src.bot.config import settings
 
 
 def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
@@ -33,6 +35,12 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
     )
     workflow.add_edge("tools_node", "agent_node")
 
-    app = workflow.compile()
+    checkpointer = DynamoDBSaver(
+        table_name=settings.DYNAMODB_TABLE_NAME,
+        endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
+        region_name=settings.AWS_REGION,
+    )
 
-    return app
+    graph = workflow.compile(checkpointer=checkpointer, interrupt_before=["end_trip"])
+
+    return graph

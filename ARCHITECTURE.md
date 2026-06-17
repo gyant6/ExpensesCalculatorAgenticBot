@@ -122,6 +122,8 @@ User (Telegram app)
   Lambda Function
         │
         ├──► DynamoDB (real, same table schema)
+        │         ├── Conversation checkpoints (langgraph-checkpoint-dynamodb)
+        │         └── Trip + Expense items
         ├──► Bedrock (Claude Haiku, same region)
         └──► api.fxratesapi.com
 ```
@@ -208,7 +210,7 @@ END
 
 This is a standard ReAct loop implemented as a LangGraph graph. The `agent` node calls Claude Haiku with the bound tools. If the model decides to call a tool, the `tools` node executes it and the result is appended to state. The loop continues until Claude returns a plain message.
 
-`end_trip` is configured with `interrupt_before=["end_trip"]` at graph compilation time. When the agent decides to call `end_trip`, the graph pauses before executing it, persists state to the DynamoDB checkpointer, and returns control to the Telegram handler. The handler sends a confirmation message to the user. On the next user message (confirmation), the graph resumes from the checkpoint and `end_trip` executes.
+`end_trip` is configured with `interrupt_before=["end_trip"]` at graph compilation time. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits a tool call for `end_trip`, the graph pauses before the tools node runs, persists state to the checkpointer, and returns. The handler detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and forwards the LLM's last message to the user as the confirmation prompt. On the next user message, the graph resumes from the checkpoint — the agent node runs again with the full conversation history and decides whether to proceed with `end_trip` based on the user's response. The LLM's instruction-based behaviour (see `end_trip` docstring) handles the confirmation logic; `interrupt_before` is the structural backstop that prevents single-turn deletion regardless of LLM behaviour.
 
 ### State Definition
 
@@ -301,7 +303,7 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 
 ### 6. `end_trip`
 - **Input:** _(none beyond user_id)_
-- **Human-in-the-loop:** The graph is compiled with `interrupt_before=["end_trip"]`. Before this tool executes, the agent must: (1) ask the user for explicit confirmation, (2) call `get_all_expenses` and present the trip summary. Only after the user confirms does the graph resume and call this tool.
+- **Human-in-the-loop:** The graph is compiled with `interrupt_before=["end_trip"]`. This guarantees `end_trip` never executes on the same turn the LLM first decides to call it — the graph always pauses and returns to the handler first. The `end_trip` docstring instructs the LLM to ask for confirmation and call `get_all_expenses` before invoking this tool. On resume (next user message), the agent node runs again with full conversation history and calls `end_trip` if the user confirmed.
 - **Action (in order, after interrupt resumes):**
   1. Calls `get_sgd_exchange_rates()` to get current FX rates.
   2. Converts each expense to SGD using the fetched rates (`sgd_amount = amount / rates[currency]`; no conversion needed when `currency == "SGD"`).
