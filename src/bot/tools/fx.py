@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 class FxRatesResponse(BaseModel):
     success: bool
-    rates: dict[str, float]
+    rates: dict[str, float] | None = None
 
 
 async def get_sgd_exchange_rates() -> dict[str, float]:
@@ -31,4 +31,6 @@ async def get_sgd_exchange_rates() -> dict[str, float]:
 
         if not json_res.success:
             raise RuntimeError(f"Failed to fetch exchange rates: {json_res}")
+        if json_res.rates is None:
+            raise RuntimeError("API returned success=True but rates field is missing")
         return json_res.rates
