@@ -43,12 +43,13 @@ def check_valid_amount(amount: str) -> bool:
 @tool
 def add_expense(
     telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    message_date: Annotated[str, InjectedState("message_date")],
     source_message: str,
     summary: str,
     category: str,
     amount: str,
     currency: str,
-    date: str,
+    date: str | None = None,
     payment_method: str = "Cash",
 ) -> str:
     """Record a new expense for the user in DynamoDB.
@@ -67,8 +68,7 @@ def add_expense(
         amount: Expense amount as a string (e.g. '12.50'). Must be a positive number.
         currency: ISO 4217 currency code (e.g. 'SGD', 'JPY', 'USD').
         date: Date the expense occurred in YYYY-MM-DD format (e.g. '2026-06-14'). Use the
-            date explicitly mentioned by the user, or fall back to the Telegram message date
-            from agent state if none is mentioned.
+            date explicitly mentioned by the user or None if the user does not specify it.
         payment_method: How the expense was paid (e.g. 'Cash', 'Card', 'PayNow').
             If the payment method is not mentioned, fall back to 'Cash'.
 
@@ -78,6 +78,9 @@ def add_expense(
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
+
+    if date is None:
+        date = message_date
 
     try:
         datetime.strptime(date, "%Y-%m-%d")
@@ -286,7 +289,7 @@ def get_all_expenses(
     items = dynamodb.query_by_prefix(f"USER#{telegram_user_id}", "EXPENSE#")
 
     if not items:
-        return "There is currently no expenses recorded."
+        return "There are currently no expenses recorded."
 
     response = "summary | category | amount | date | payment_method"
     for i, expense in enumerate(items, start=1):

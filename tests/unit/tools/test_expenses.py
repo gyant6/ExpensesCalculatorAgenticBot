@@ -26,6 +26,7 @@ def test_add_expense(
         invoke_input: dict[str, Any] = {
             **base_expense,
             "telegram_user_id": TELEGRAM_USER_ID,
+            "message_date": "2026-01-30",
             "payment_method": "Card",
         }
         tool_output = expenses.add_expense.invoke(invoke_input)
@@ -55,6 +56,7 @@ def test_add_expense_default_payment_method(
         invoke_input: dict[str, Any] = {
             **base_expense,
             "telegram_user_id": TELEGRAM_USER_ID,
+            "message_date": "2026-01-30",
         }
         tool_output = expenses.add_expense.invoke(invoke_input)
 
@@ -70,10 +72,35 @@ def test_add_expense_default_payment_method(
     }
 
 
+def test_add_expense_no_date_falls_back_to_message_date(
+    dynamodb_table: DynamoDBClient, base_expense: dict[str, Any]
+) -> None:
+    with patch("src.bot.tools.expenses.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2025, 2, 3, tzinfo=timezone.utc)
+        mock_dt.strptime.side_effect = datetime.strptime
+        datetime_now = mock_dt.now().isoformat(timespec="microseconds")
+
+        invoke_input: dict[str, Any] = {
+            **base_expense,
+            "telegram_user_id": TELEGRAM_USER_ID,
+            "message_date": "2026-01-30",
+            "payment_method": "PayNow",
+            "date": None,
+        }
+        tool_output = expenses.add_expense.invoke(invoke_input)
+
+    assert tool_output == "Expense recorded."
+
+    item = dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", f"EXPENSE#{datetime_now}")
+    assert item is not None
+    assert item["date"] == invoke_input["message_date"]
+
+
 def test_add_expense_invalid_date_format(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
         "telegram_user_id": TELEGRAM_USER_ID,
+        "message_date": "2026-01-30",
         "date": "2023-13-20",
     }
     tool_output = expenses.add_expense.invoke(invoke_input)
@@ -85,6 +112,7 @@ def test_add_expense_invalid_amount(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
         "telegram_user_id": TELEGRAM_USER_ID,
+        "message_date": "2026-01-30",
         "amount": "invalid_amount",
     }
     tool_output = expenses.add_expense.invoke(invoke_input)
@@ -99,6 +127,7 @@ def test_add_expense_zero_amount(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
         "telegram_user_id": TELEGRAM_USER_ID,
+        "message_date": "2026-01-30",
         "amount": "0",
     }
     tool_output = expenses.add_expense.invoke(invoke_input)
@@ -113,6 +142,7 @@ def test_add_expense_negative_amount(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
         "telegram_user_id": TELEGRAM_USER_ID,
+        "message_date": "2026-01-30",
         "amount": "-1.35",
     }
     tool_output = expenses.add_expense.invoke(invoke_input)
@@ -127,6 +157,7 @@ def test_add_expense_invalid_category(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
         "telegram_user_id": TELEGRAM_USER_ID,
+        "message_date": "2026-01-30",
         "category": "Casino",
     }
     tool_output = expenses.add_expense.invoke(invoke_input)
@@ -565,7 +596,7 @@ def test_get_all_expenses_no_expenses(dynamodb_table: DynamoDBClient) -> None:
     tool_output = expenses.get_all_expenses.invoke(
         {"telegram_user_id": TELEGRAM_USER_ID}
     )
-    assert tool_output == "There is currently no expenses recorded."
+    assert tool_output == "There are currently no expenses recorded."
 
 
 def test_get_all_expenses_single_expense(
