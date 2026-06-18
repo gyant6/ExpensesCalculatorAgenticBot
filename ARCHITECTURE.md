@@ -70,8 +70,9 @@ ExpensesCalculatorAgenticBot/
     └── evals/
         ├── __init__.py
         ├── datasets/
-        │   ├── expense_extraction.json   # 20+ labelled examples
-        │   └── intent_classification.json
+        │   ├── expense_extraction.json       # 20+ labelled examples
+        │   ├── intent_classification.json
+        │   └── end_trip_confirmation.json    # multi-turn examples: confirmation vs denial vs ambiguous
         ├── evaluators.py         # LangSmith evaluator definitions
         └── run_evals.py          # entrypoint: uv run python -m tests.evals.run_evals
 ```
@@ -511,6 +512,8 @@ Evaluates the agent's LLM-driven behaviour using **LangSmith**. This is not run 
 | `merchant_extraction` | LLM-as-judge | Claude grades whether the extracted merchant is reasonable given the input |
 | `tool_correctness` | Rule-based | Checks the first tool called matches `expected_tool` |
 | `response_quality` | LLM-as-judge | Claude scores the bot's final reply on clarity and helpfulness (1–5) |
+| `end_trip_confirmation` | LLM-as-judge | Claude grades whether the agent correctly called or refused `end_trip` based on the user's confirmation message; covers ambiguous replies ("yeah sure", "actually wait no") |
+| `currency_extraction` | LLM-as-judge | Claude grades whether the agent correctly identified the currency from informal expressions ("quid", "bucks", "yuan") where exact-match rules are insufficient |
 
 **Running evals:**
 ```bash
