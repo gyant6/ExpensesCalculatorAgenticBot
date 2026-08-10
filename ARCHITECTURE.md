@@ -18,7 +18,8 @@ An agentic Telegram chatbot that helps users track overseas travel expenses. The
 | Local DB | DynamoDB Local (Docker) | Identical boto3 API; switch via `DYNAMODB_ENDPOINT_URL` env var |
 | Conversation state | LangGraph DynamoDB checkpointer (`langgraph-checkpoint-dynamodb`) | Persists full graph state per user; delete checkpoint = clear history |
 | Packaging | `uv` + `pyproject.toml` | Modern Python standard; fast installs; clean Lambda packaging |
-| Charts | `matplotlib` | Generate pie chart PNG in memory; send as Telegram photo |
+| Charts | `matplotlib` | Generate pie chart (by category) and bar chart (by day) as PNGs in memory; sent as Telegram photos on trip end |
+| CSV export | Python stdlib `csv` | Generate expense CSV with SGD-equivalent column on trip end; sent as Telegram file attachment |
 | FX rates | `api.fxratesapi.com` | Free, no auth required, simple GET |
 
 ---
@@ -49,6 +50,7 @@ ExpensesCalculatorAgenticBot/
 │       ├── storage/
 │       │   ├── __init__.py
 │       │   └── dynamodb.py       # DynamoDB client + table operations
+│       ├── charts.py             # pie chart, bar chart, CSV generation for end_trip
 │       ├── telegram_handler.py   # receives Telegram updates, calls agent
 │       └── config.py             # settings via pydantic-settings
 └── tests/
@@ -180,6 +182,8 @@ Design constraints:
 
 This check must be the first operation in the handler, before any DynamoDB or Bedrock calls.
 
+> **Status:** Not yet implemented. Deferred to Phase 3 alongside the Lambda/API Gateway work.
+
 ---
 
 ## LangGraph Agent Design
@@ -227,9 +231,8 @@ class AgentState(MessagesState):
     message_date: str           # YYYY-MM-DD date of the incoming Telegram message; set by
                                 # telegram_handler.py; used by add_expense as fallback date when
                                 # the user does not explicitly mention one
-    chart_bytes: bytes | None   # Set by end_trip via Command return after generating the pie
-                                # chart; read by telegram_handler.py after graph finishes to
-                                # send the chart as a Telegram photo; None on all other turns
+    trip_start_date: str | None # Set by check_trip_status node; passed to system prompt so the
+                                # LLM knows whether a trip is active and when it started
 ```
 
 ### Checkpointing (Conversation Memory)
@@ -304,16 +307,17 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 
 ### 6. `end_trip`
 - **Input:** _(none beyond user_id)_
-- **Human-in-the-loop:** The graph is compiled with `interrupt_before=["end_trip"]`. This guarantees `end_trip` never executes on the same turn the LLM first decides to call it — the graph always pauses and returns to the handler first. The `end_trip` docstring instructs the LLM to ask for confirmation and call `get_all_expenses` before invoking this tool. On resume (next user message), the agent node runs again with full conversation history and calls `end_trip` if the user confirmed.
-- **Action (in order, after interrupt resumes):**
-  1. Calls `get_sgd_exchange_rates()` to get current FX rates.
-  2. Converts each expense to SGD using the fetched rates (`sgd_amount = amount / rates[currency]`; no conversion needed when `currency == "SGD"`).
-  3. Generates summary text (totals by category, grand total in SGD, per-expense table).
-  4. Generates matplotlib pie chart PNG in memory.
-  5. Deletes all `EXPENSE#*` items and the `TRIP#ACTIVE` item.
-  6. Deletes the LangGraph DynamoDB checkpoint for this `thread_id`.
-  7. Returns the summary text + chart image to the Telegram handler.
-- **Returns:** A confirmation string to the LLM. Chart bytes are written to `AgentState.chart_bytes` via a `Command` return — `telegram_handler.py` reads this after the graph finishes and sends the chart as a separate Telegram photo message.
+- **Human-in-the-loop:** The graph is compiled with `interrupt_before=["end_trip_node"]`. This guarantees `end_trip` never executes on the same turn the LLM first decides to call it. The graph pauses, saves state to the checkpointer, and returns control to `handle_message`, which sends a Yes/No inline keyboard to the user.
+- **On confirm (`handle_callback`):** The handler takes over the deletion and report generation before the tool logically "runs":
+  1. Fetches all `EXPENSE#*` items from DynamoDB (still present at this point).
+  2. Calls `get_sgd_exchange_rates()` to get live FX rates.
+  3. Calls `generate_csv(expenses, fx_rates)` → CSV bytes with an `amount_sgd` column.
+  4. Calls `generate_charts(expenses, fx_rates)` → pie chart PNG (by category) + bar chart PNG (by day).
+  5. Deletes all `EXPENSE#*` items and the `TRIP#ACTIVE` item directly via DynamoDB.
+  6. Injects the CSV text as the `end_trip` tool result via `graph.update_state(..., as_node="end_trip_node")`.
+  7. Resumes the graph → `agent_node` sees the CSV as the tool result and generates a summary with total SGD spend and per-category breakdown.
+- **Returns (to LLM):** CSV of all expenses with SGD amounts (injected by handler, not the real tool return). The actual tool return value ("Trip successfully ended.") is never used.
+- **Sent to user:** LLM summary text → pie chart photo → bar chart photo → `expenses.csv` file attachment.
 
 ### 7. `get_sgd_exchange_rates`
 - **Input:** _(none)_
@@ -350,37 +354,24 @@ FX conversion happens once at end_trip:
 
 ## Trip Summary (end_trip output)
 
-Sent to the user as two Telegram messages:
+Sent to the user as four Telegram messages in sequence:
 
-**Message 1 — Text (Markdown):**
+**Message 1 — Text (plain text):**
+LLM-generated warm summary (2–3 sentences) including total SGD spend, followed by a
+per-category SGD breakdown, one line per category:
 ```
-*Trip Summary*
-Started: 4 Jun 2026 | All amounts in SGD
+What a trip! You spent a total of SGD 58.82 across 7 expenses over 4 days.
 
-*Expenses by Category*
-| Category       | Total (SGD) |
-|----------------|-------------|
-| Food & Dining  | $45.20      |
-| Transport      | $28.50      |
-| Accommodation  | $210.00     |
-| Shopping       | $95.30      |
-
-*Grand Total: SGD 379.00*
-
-*AI Analysis*
-Your largest spending category was Accommodation (55%).
-You spent an average of SGD 54.14/day...
-[etc]
-
-*All Expenses*
-| Date  | Merchant   | Category      | Amount       | SGD   |
-|-------|------------|---------------|--------------|-------|
-| 04/06 | Ichiran    | Food & Dining | 1,200 JPY    | 11.50 |
-| ...   | ...        | ...           | ...          | ...   |
+Food: SGD 32.10
+Transport: SGD 15.44
+Leisure: SGD 11.28
 ```
 
-**Message 2 — Photo:**
-Matplotlib pie chart of spending by category (PNG, generated in memory).
+**Message 2 — Photo:** Pie chart of spending by category (PNG, generated in memory via `matplotlib`).
+
+**Message 3 — Photo:** Bar chart of daily spending in SGD (PNG, generated in memory via `matplotlib`).
+
+**Message 4 — File:** `expenses.csv` with columns: `date, summary, category, amount, currency, amount_sgd, payment_method`.
 
 ---
 
