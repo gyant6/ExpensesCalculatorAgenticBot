@@ -176,13 +176,46 @@ Design constraints:
 - **IAM scope:** the Lambda execution role grants `apigateway:UpdateRestApiPolicy` scoped to the specific webhook API ARN only.
 - **Structured logging:** logs the full new policy document on every successful update so changes are auditable in CloudWatch.
 
-### Layer B — User allowlist (telegram_handler.py, local and prod)
+### Layer B — Access control (telegram_handler.py, local and prod)
 
-`telegram_handler.py` checks the `telegram_user_id` from the incoming update against `ALLOWED_TELEGRAM_IDS` (a comma-separated list in the environment / SSM) before invoking the agent. Unauthorized users receive no response and no Lambda compute is wasted on the agent graph.
+`telegram_handler.py` checks the incoming `user_id` (or `chat_id` for groups) against `AUTH#<id>` items in DynamoDB before invoking the agent. This runs first, before any Bedrock or expense-related DynamoDB calls.
 
-This check must be the first operation in the handler, before any DynamoDB or Bedrock calls.
+**DynamoDB schema for auth items:**
 
-> **Status:** Not yet implemented. Deferred to Phase 3 alongside the Lambda/API Gateway work.
+| PK | SK | Attributes |
+|---|---|---|
+| `AUTH#<id>` | `PROFILE` | `status` (PENDING/APPROVED/REJECTED), `entity_type` (USER/GROUP), `username`, `requested_at`, `reviewed_at` |
+
+Telegram user IDs are positive integers; group IDs are negative — the same `AUTH#<id>` key scheme covers both. The `entity_type` field makes the distinction explicit for querying and display.
+
+**Auth check logic (on every incoming message):**
+
+1. Look up `AUTH#<user_id>` (and `AUTH#<chat_id>` if the message is from a group).
+2. `APPROVED` → proceed normally.
+3. `PENDING` → reply "Your access request is already pending approval." Do nothing else.
+4. `REJECTED` → silently ignore.
+5. Not found → create `AUTH#<user_id>` with `status=PENDING`, then send an approval request to the admin.
+
+**Approval request sent to admin (Telegram ID `35153600`):**
+
+```python
+keyboard = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Approve", callback_data=json.dumps({"action": "auth:approve", "id": requester_id, "type": "USER"}))],
+    [InlineKeyboardButton("Reject",  callback_data=json.dumps({"action": "auth:reject",  "id": requester_id, "type": "USER"}))],
+])
+message = f"Access request from @{username} (ID: {requester_id})"
+```
+
+Callback prefix `auth:` is handled by a dedicated `CallbackQueryHandler` in `main.py`, parallel to the existing `end_trip:` handler. On Approve/Reject, the handler updates `AUTH#<id>.status` in DynamoDB and notifies the requester.
+
+**Group extension:** Group and user approvals are independent scopes — being approved in a group does not grant direct message access, and vice versa.
+
+- Private chat → check `AUTH#<user_id>` only.
+- Group chat → check `AUTH#<chat_id>` (negative group ID) only.
+
+Approving a group ID grants access to all members messaging the bot within that group. It does not affect whether those members can message the bot directly.
+
+**Admin ID** is stored in config as `ADMIN_TELEGRAM_ID` (env var / SSM in prod), not hardcoded.
 
 ---
 
@@ -254,6 +287,9 @@ class AgentState(MessagesState):
 |---|---|---|---|
 | `USER#<telegram_user_id>` | `TRIP#ACTIVE` | `start_date` | Active trip marker |
 | `USER#<telegram_user_id>` | `EXPENSE#<datetime>` | see below | Individual expense |
+| `AUTH#<id>` | `PROFILE` | `status`, `entity_type`, `username`, `requested_at`, `reviewed_at` | Access control record (user or group) |
+
+`<id>` is the Telegram user ID (positive) or group ID (negative). `entity_type` is `USER` or `GROUP`. `status` is `PENDING`, `APPROVED`, or `REJECTED`.
 
 **Expense item attributes:**
 
@@ -571,6 +607,10 @@ dev = [
 - [ ] System prompt engineering
 - [ ] Telegram polling handler (local mode)
 - [ ] `end_trip` summary: text generation + matplotlib chart
+- [ ] Access control: `AUTH#<id>` DynamoDB items, PENDING/APPROVED/REJECTED states
+- [ ] Admin approval flow: unknown users trigger Approve/Reject message to admin via inline keyboard
+- [ ] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
+- [ ] `ADMIN_TELEGRAM_ID` in config (env var / SSM in prod)
 - [ ] Manual end-to-end testing via Telegram
 - [ ] LangSmith project setup; build initial eval datasets; run first eval baseline
 
@@ -668,7 +708,6 @@ uv run pre-commit run --all-files
 - [ ] API Gateway setup (POST /webhook)
 - [ ] API Gateway resource policy: IP allowlist from Telegram's CIDR ranges
 - [ ] API Gateway webhook secret token (`X-Telegram-Bot-Api-Secret-Token`) validation in handler
-- [ ] User allowlist (`ALLOWED_TELEGRAM_IDS`) check in `telegram_handler.py`
 - [ ] Register Telegram webhook URL with BotFather (set `secret_token` at registration time)
 - [ ] IAM role with least-privilege DynamoDB + Bedrock permissions
 - [ ] Lambda packaging via `uv export --no-dev` + zip or container image
