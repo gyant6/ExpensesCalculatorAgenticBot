@@ -52,7 +52,7 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
     workflow.add_edge("check_trip_status", "agent_node")
 
     workflow.add_conditional_edges(
-        "agent_node", custom_routes, {"tools": "tools_node", "end_trip": "end_trip_node"}
+        "agent_node", custom_routes, {"tools": "tools_node", "end_trip": "end_trip_node", END: END}
     )
     workflow.add_edge("tools_node", "agent_node")
     workflow.add_edge("end_trip_node", "agent_node")

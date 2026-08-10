@@ -51,12 +51,9 @@ def end_trip(
 ) -> str:
     """End the current active trip and delete all associated expense records.
 
-    Before calling this tool: (1) ask the user explicitly whether they want to
-    end the trip and wait for confirmation, (2) call get_all_expenses and present
-    the trip summary, then (3) call this tool to end the trip.
-
-    Call this when the user confirms they want to end the trip — e.g. "yes end
-    it", "go ahead", "clear everything".
+    Call this when the user asks to end the trip. Always call get_all_expenses
+    first to present the summary, then call this tool. The user will be shown a
+    confirmation prompt by the application before this tool actually executes.
 
     Args:
         telegram_user_id: The Telegram user ID of the user ending the trip.
