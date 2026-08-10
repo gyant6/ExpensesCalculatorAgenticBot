@@ -8,6 +8,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from src.bot.agent.graph import build_graph
+from src.bot.charts import generate_charts
+from src.bot.storage.dynamodb import query_by_prefix
+from src.bot.tools.fx import get_sgd_exchange_rates
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,33 @@ _END_TRIP_CANCEL = "end_trip:cancel"
 
 def _config(telegram_user_id: str) -> dict:
     return {"configurable": {"thread_id": telegram_user_id}}
+
+
+def _parse_mode(text: str) -> str | None:
+    """Return 'HTML' if the text contains HTML tags, None otherwise."""
+    return "HTML" if "<" in text else None
+
+
+def _extract_text(content: str | list) -> str:
+    """Extract plain text from an AI message content field.
+
+    LangChain+Bedrock returns a list of typed blocks when the response contains
+    both text and tool_use blocks. This function normalises that to a plain string.
+
+    Args:
+        content: Either a plain string or a list of Bedrock content blocks.
+
+    Returns:
+        The concatenated text from all text-type blocks, or the original string.
+    """
+    if isinstance(content, str):
+        return content
+    texts = [
+        block["text"]
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    return "\n".join(texts)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -70,8 +100,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     else:
         last_msg = result["messages"][-1]
-        await update.message.reply_text(last_msg.content or "(no reply)")
-        await _send_charts(update, result)
+        content = _extract_text(last_msg.content) or "(no reply)"
+        await update.message.reply_text(content, parse_mode=_parse_mode(content))
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -103,10 +133,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if query.data == _END_TRIP_CONFIRM:
-        result = await asyncio.to_thread(_graph.invoke, None, config)
-        last_msg = result["messages"][-1]
-        await query.edit_message_text(last_msg.content or "Trip ended.")
-        await _send_charts(update, result)
+        # Capture the AI summary before resuming — end_trip_node routes to END and
+        # deletes all expense data, so the pre-interrupt message is the one to show.
+        summary_content = _extract_text(state.values["messages"][-1].content) or "Trip ended."
+        pie_bytes, bar_bytes = await _generate_trip_charts(user_id)
+        await asyncio.to_thread(_graph.invoke, None, config)
+        await query.edit_message_text(summary_content, parse_mode=_parse_mode(summary_content))
+        if pie_bytes:
+            await query.message.reply_photo(pie_bytes)
+        if bar_bytes:
+            await query.message.reply_photo(bar_bytes)
     else:
         last_ai = state.values["messages"][-1]
         tool_call_id = last_ai.tool_calls[0]["id"]
@@ -121,22 +157,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         result = await asyncio.to_thread(_graph.invoke, None, config)
         last_msg = result["messages"][-1]
-        await query.edit_message_text(last_msg.content or "Trip ending cancelled.")
+        content = _extract_text(last_msg.content) or "Trip ending cancelled."
+        await query.edit_message_text(content, parse_mode=_parse_mode(content))
 
 
-async def _send_charts(update: Update, result: dict) -> None:
-    """Send pie and bar chart images from the graph result if present.
+async def _generate_trip_charts(user_id: str) -> tuple[bytes | None, bytes | None]:
+    """Fetch expenses and live FX rates, then generate pie and bar charts.
+
+    Must be called BEFORE the graph resumes end_trip_node, because that node
+    deletes all expense records from DynamoDB.
 
     Args:
-        update: The Telegram Update, used to find the chat to reply to.
-        result: The graph result dict, checked for pie_chart_bytes and bar_chart_bytes.
+        user_id: Telegram user ID string, used as the DynamoDB partition key suffix.
+
+    Returns:
+        Tuple of (pie_chart_bytes, bar_chart_bytes). Either or both may be None if
+        there are no expenses or if chart generation fails.
     """
-    msg = update.message or (update.callback_query and update.callback_query.message)
-    if not msg:
-        return
-    pie = result.get("pie_chart_bytes")
-    bar = result.get("bar_chart_bytes")
-    if pie:
-        await msg.reply_photo(pie)
-    if bar:
-        await msg.reply_photo(bar)
+    try:
+        expenses = await asyncio.to_thread(query_by_prefix, f"USER#{user_id}", "EXPENSE#")
+        if not expenses:
+            return None, None
+        fx_rates = await get_sgd_exchange_rates()
+        pie_bytes, bar_bytes = generate_charts(expenses, fx_rates)
+        return pie_bytes, bar_bytes
+    except Exception:
+        logger.exception("Failed to generate trip charts for user %s", user_id)
+        return None, None
