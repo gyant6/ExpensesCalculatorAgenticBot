@@ -2,7 +2,7 @@
 
 ## Overview
 
-An agentic Telegram chatbot that helps users track overseas travel expenses. The agent uses LangGraph for stateful conversation management, Claude Haiku on AWS Bedrock as the LLM, and DynamoDB as the sole database (conversation history + expenses). Designed for local development first, with a clear migration path to serverless AWS (API Gateway + Lambda).
+An agentic Telegram chatbot — *Zuzu* — that helps users track overseas travel expenses. The agent uses LangGraph for stateful conversation management, Claude Haiku on AWS Bedrock as the LLM, and DynamoDB as the sole database (conversation history + expenses).
 
 ---
 
@@ -10,13 +10,13 @@ An agentic Telegram chatbot that helps users track overseas travel expenses. The
 
 | Concern | Choice | Reason |
 |---|---|---|
-| LLM | Claude Haiku (`anthropic.claude-haiku-4-5-20251001`) on Bedrock | Fast responses, low cost, sufficient for structured extraction |
+| LLM | Claude Haiku (`global.anthropic.claude-haiku-4-5-20251001-v1:0`) on Bedrock | Fast responses, low cost, sufficient for structured extraction |
 | Agent framework | LangGraph | Production-standard stateful agent; checkpointing built-in; CV-worthy |
-| LLM integration | `langchain-aws` (`ChatBedrock`) | First-class LangChain/LangGraph integration with Bedrock |
+| LLM integration | `langchain-aws` (`ChatBedrockConverse`) | First-class LangChain/LangGraph integration with Bedrock |
 | Telegram | `python-telegram-bot` | Well-maintained, supports both polling (local) and webhook (Lambda) |
 | Database | DynamoDB (single-table) | Native CRUD, serverless, free tier sufficient |
 | Local DB | DynamoDB Local (Docker) | Identical boto3 API; switch via `DYNAMODB_ENDPOINT_URL` env var |
-| Conversation state | LangGraph DynamoDB checkpointer (`langgraph-checkpoint-dynamodb`) | Persists full graph state per user; delete checkpoint = clear history |
+| Conversation state | LangGraph DynamoDB checkpointer (`langgraph-checkpoint-aws`, `DynamoDBSaver`) | Persists full graph state per user; delete checkpoint = clear history |
 | Packaging | `uv` + `pyproject.toml` | Modern Python standard; fast installs; clean Lambda packaging |
 | Charts | `matplotlib` | Generate pie chart (by category) and bar chart (by day) as PNGs in memory; sent as Telegram photos on trip end |
 | CSV export | Python stdlib `csv` | Generate expense CSV with SGD-equivalent column on trip end; sent as Telegram file attachment |
@@ -31,7 +31,8 @@ ExpensesCalculatorAgenticBot/
 ├── pyproject.toml
 ├── .env.example
 ├── .env                          # gitignored
-├── docker-compose.yml            # DynamoDB Local
+├── docker-compose.yml            # DynamoDB Local + one-off table creation
+├── dev_runner.py                 # interactive terminal REPL against the graph, no Telegram
 ├── src/
 │   ├── __init__.py
 │   └── bot/
@@ -39,14 +40,15 @@ ExpensesCalculatorAgenticBot/
 │       ├── main.py               # entrypoint (polling locally, Lambda handler in prod)
 │       ├── agent/
 │       │   ├── __init__.py
-│       │   ├── graph.py          # LangGraph graph definition
+│       │   ├── graph.py          # LangGraph graph definition + router
+│       │   ├── nodes.py          # check_trip_status, agent_node, LLM + tool binding
 │       │   ├── state.py          # AgentState TypedDict
 │       │   └── prompts.py        # system prompt
 │       ├── tools/
 │       │   ├── __init__.py
 │       │   ├── trip.py           # start_trip, end_trip
 │       │   ├── expenses.py       # add, edit, delete, list expenses
-│       │   └── fx.py             # get_exchange_rate
+│       │   └── fx.py             # get_sgd_exchange_rates
 │       ├── storage/
 │       │   ├── __init__.py
 │       │   └── dynamodb.py       # DynamoDB client + table operations
@@ -55,6 +57,7 @@ ExpensesCalculatorAgenticBot/
 │       └── config.py             # settings via pydantic-settings
 └── tests/
     ├── __init__.py
+    ├── conftest.py               # moto fixtures + table creation
     ├── unit/
     │   ├── __init__.py
     │   ├── tools/
@@ -104,7 +107,7 @@ User (Telegram app)
         │         ├── Conversation checkpoints
         │         └── Trip + Expense items
         │
-        ├──► AWS Bedrock (us-east-1 or ap-southeast-2)
+        ├──► AWS Bedrock
         │         └── Claude Haiku (via local AWS credentials)
         │
         └──► api.fxratesapi.com (HTTPS)
@@ -125,7 +128,7 @@ User (Telegram app)
   Lambda Function
         │
         ├──► DynamoDB (real, same table schema)
-        │         ├── Conversation checkpoints (langgraph-checkpoint-dynamodb)
+        │         ├── Conversation checkpoints (langgraph-checkpoint-aws)
         │         └── Trip + Expense items
         ├──► Bedrock (Claude Haiku, same region)
         └──► api.fxratesapi.com
@@ -227,28 +230,32 @@ Approving a group ID grants access to all members messaging the bot within that 
 START
   │
   ▼
-[check_trip_status node]
+[check_trip_status]
   │  (reads TRIP#ACTIVE from DynamoDB, sets trip_start_date in state)
   ▼
-[agent node]  ◄─────────────────────┐
-  │                                  │
-  ├── if tool_calls in response ─►  [tools node]
-  │                                  │  interrupt_before=["end_trip"]:
-  │                                  │  graph pauses, saves state to checkpointer,
-  │                                  │  returns control to telegram_handler.py which
-  │                                  │  sends confirmation prompt to user; resumes
-  │                                  │  on next message
-  │                                  │
-  │                                ──┘ (tool results appended to messages)
-  │
-  │  (if no tool_calls — final response)
-  ▼
-END
+[agent_node] ◄──────────────────────────────────────────┐
+  │                                                     │
+  │  custom_routes(state) inspects the last message:     │
+  │                                                     │
+  ├── no tool_calls ────────────────────────────► END    │
+  │                                                     │
+  ├── tool_calls[0]["name"] == "end_trip"                │
+  │        └──► [end_trip_node] ─────────────────────────┤
+  │               interrupt_before: graph pauses here    │
+  │               before the tool executes, persists     │
+  │               state, and returns to the handler      │
+  │                                                     │
+  └── any other tool                                    │
+           └──► [tools_node] ────────────────────────────┘
+                  start_trip, add_expense, edit_expense,
+                  delete_expense, get_all_expenses
 ```
 
-This is a standard ReAct loop implemented as a LangGraph graph. The `agent` node calls Claude Haiku with the bound tools. If the model decides to call a tool, the `tools` node executes it and the result is appended to state. The loop continues until Claude returns a plain message.
+This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls Claude Haiku with the bound tools. `custom_routes` then inspects the last message: no tool calls ends the turn, an `end_trip` call routes to `end_trip_node`, and any other tool call routes to `tools_node`. Both tool nodes edge back to `agent_node`, so the loop continues until Claude returns a plain message.
 
-`end_trip` is configured with `interrupt_before=["end_trip"]` at graph compilation time. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits a tool call for `end_trip`, the graph pauses before the tools node runs, persists state to the checkpointer, and returns. The handler detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and forwards the LLM's last message to the user as the confirmation prompt. On the next user message, the graph resumes from the checkpoint — the agent node runs again with the full conversation history and decides whether to proceed with `end_trip` based on the user's response. The LLM's instruction-based behaviour (see `end_trip` docstring) handles the confirmation logic; `interrupt_before` is the structural backstop that prevents single-turn deletion regardless of LLM behaviour.
+`end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
+
+Confirmation arrives as a callback query rather than as a new text message. `handle_callback` performs the deletion and report generation, injects the result as the tool message via `graph.update_state(..., as_node="end_trip_node")`, and resumes the graph so `agent_node` can write the summary. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
 
 ### State Definition
 
@@ -271,7 +278,7 @@ class AgentState(MessagesState):
 ### Checkpointing (Conversation Memory)
 
 - `thread_id` = `str(telegram_user_id)`
-- LangGraph checkpointer (`langgraph-checkpoint-dynamodb`) persists the full `messages` list to DynamoDB after every graph step
+- LangGraph checkpointer (`langgraph-checkpoint-aws`, `DynamoDBSaver`) persists the full `messages` list to DynamoDB after every graph step
 - When a trip ends: `end_trip` tool deletes all expense/trip items AND deletes the checkpoint for this `thread_id`
 - When a trip starts: fresh checkpoint begins automatically on next message
 
@@ -298,12 +305,12 @@ class AgentState(MessagesState):
 | `PK` | String | `USER#123456789` |
 | `SK` | String | `EXPENSE#2026-06-04T14:32:05.123456+00:00` |
 | `date` | String (ISO-8601) | `2026-06-04` |
-| `raw` | String | `1200 yen at Ichiran ramen for dinner` |
-| `category` | String | `Food & Dining` |
+| `source_message` | String | `1200 yen at Ichiran ramen for dinner` |
+| `category` | String | `Food` |
 | `currency` | String | `JPY` |
-| `amount` | Decimal | `1200` |
-| `merchant` | String | `Ichiran` |
+| `amount` | String | `1200` |
 | `summary` | String | `Dinner at Ichiran ramen` |
+| `payment_method` | String | `Cash` |
 | `updated_at` | String (ISO-8601) | `2026-06-04T13:45:00.000000+00:00` |
 
 **Local vs prod switch:** Set `DYNAMODB_ENDPOINT_URL=http://localhost:8000` in local `.env`. Unset (or absent) in prod — boto3 connects to real DynamoDB automatically.
@@ -320,26 +327,25 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 - **Returns:** Confirmation with start date.
 
 ### 2. `add_expense`
-- **Input:** `date: str`, `raw: str`, `amount: float`, `currency: str`, `merchant: str`, `category: str`, `summary: str`
-- **Action:** Writes `EXPENSE#<datetime>` item (SK = `datetime.utcnow().isoformat()`) with the raw amount and currency as provided. No FX conversion at write time.
-- **Returns:** Expense summary.
-- **Note:** The LLM extracts all structured fields from the user's raw message. If the user does not mention a currency, the LLM defaults `currency` to `"SGD"`.
+- **Input:** `source_message: str`, `summary: str`, `category: str`, `amount: str`, `currency: str`, `date: str | None = None`, `payment_method: str = "Cash"`
+- **Action:** Writes an `EXPENSE#<datetime>` item (SK = `EXPENSE#` + `datetime.now(timezone.utc).isoformat()`) with the amount and currency as provided. No FX conversion at write time. When `date` is None, falls back to `message_date` from state.
+- **Returns:** `"Expense recorded."`, or a validation error string describing what was invalid.
+- **Note:** The LLM extracts all structured fields from the user's raw message. If the user does not mention a currency, the LLM defaults `currency` to `"SGD"`. `category` must be one of the values in `CATEGORIES`; `amount` must parse as a positive `Decimal`; `date` must be `YYYY-MM-DD`.
 
 ### 3. `edit_expense`
-- **Input:** `expense_id: str`, and any subset of editable fields (`amount`, `currency`, `merchant`, `category`, `summary`, `date`)
-- **Action:** Updates the specified fields. Updates `updated_at`.
-- **Returns:** Updated expense summary.
+- **Input:** `expense_num: int` (1-based index as shown by `get_all_expenses`), `edit_message: str`, `summary: str`, and any subset of `category`, `amount`, `currency`, `date`, `payment_method`
+- **Action:** Updates the supplied fields and `updated_at`, appending `edit_message` to the existing `source_message`. When `date` changes the SK must change too, so the item is moved via a single `transact_write_items` (delete + put) instead of updated in place.
+- **Returns:** `"Edit expense successful."`, or an error string if no optional field was supplied or a value failed validation.
 
 ### 4. `delete_expense`
-- **Input:** `expense_id: str`
-- **Action:** Deletes the `EXPENSE#<expense_id>` item.
-- **Returns:** Confirmation.
+- **Input:** `expense_num: int` (1-based index as shown by `get_all_expenses`)
+- **Action:** Queries all `EXPENSE#*` items for this user and deletes the one at that position.
+- **Returns:** `"Expense deleted."`, or an error string if the index is out of range.
 
 ### 5. `get_all_expenses`
 - **Input:** _(none beyond user_id)_
-- **Action:** Queries all `EXPENSE#*` items for this user. Also fetches `TRIP#ACTIVE` for trip metadata.
-- **Returns:** Structured list of all expenses + trip metadata.
-- **Note:** If no `TRIP#ACTIVE` item exists, returns a signal that no trip is active. The agent then tells the user to start a trip first.
+- **Action:** Queries all `EXPENSE#*` items for this user.
+- **Returns:** A numbered, pipe-delimited list — `summary | category | amount currency | date | payment_method` — or a message indicating no expenses are recorded. The 1-based position in this list is what `edit_expense` and `delete_expense` take as `expense_num`.
 
 ### 6. `end_trip`
 - **Input:** _(none beyond user_id)_
@@ -359,7 +365,7 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 - **Input:** _(none)_
 - **Action:** `GET https://api.fxratesapi.com/latest?base=SGD`. Fetches all rates with SGD as the base.
 - **Returns:** `dict` mapping currency codes to their rate relative to SGD (e.g. `{"JPY": 167.5, "USD": 0.74}`). To convert a foreign amount to SGD: `sgd_amount = foreign_amount / rates[currency]`.
-- **Note:** Called internally by `end_trip` only. Not directly exposed to the LLM.
+- **Note:** Called by `handle_callback` in `telegram_handler.py` when the user confirms ending a trip. Not bound to the LLM.
 
 ---
 
@@ -370,14 +376,14 @@ The LLM extracts structured fields from the user's natural language before calli
 ```
 Example A — foreign currency explicitly mentioned:
   User: "spent 1200 yen at Ichiran ramen for dinner yesterday"
-  LLM extracts: date=2026-06-03, amount=1200, currency=JPY, merchant=Ichiran,
-                category=Food & Dining, summary="Dinner at Ichiran ramen"
+  LLM extracts: date=2026-06-03, amount=1200, currency=JPY,
+                category=Food, summary="Dinner at Ichiran ramen"
   Stored as-is: amount=1200, currency=JPY (no FX call at write time)
 
 Example B — no currency mentioned, defaults to SGD:
   User: "paid $12 for chicken rice at Maxwell"
-  LLM extracts: date=2026-06-04, amount=12, currency=SGD, merchant=Maxwell Food Centre,
-                category=Food & Dining, summary="Chicken rice at Maxwell"
+  LLM extracts: date=2026-06-04, amount=12, currency=SGD,
+                category=Food, summary="Chicken rice at Maxwell"
   Stored as-is: amount=12, currency=SGD
 
 FX conversion happens once at end_trip:
@@ -421,6 +427,8 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 
 # AWS
 AWS_REGION=ap-southeast-2
+AWS_BEDROCK_MODEL_ID=global.anthropic.claude-haiku-4-5-20251001-v1:0
+AWS_BEDROCK_PROFILE=        # optional; named AWS profile for local Bedrock calls
 AWS_ACCESS_KEY_ID=          # local: from ~/.aws/credentials; Lambda: IAM role
 AWS_SECRET_ACCESS_KEY=      # local: from ~/.aws/credentials; Lambda: IAM role
 
@@ -456,7 +464,7 @@ Test each tool and storage function in complete isolation. All external dependen
 
 **Libraries:**
 - `pytest` — test runner
-- `pytest-asyncio` — async test support (all tool functions are async)
+- `pytest-asyncio` — async test support (`get_sgd_exchange_rates` and the Telegram handlers are async; the tools themselves are sync)
 - `moto[dynamodb]` — intercepts boto3 calls and emulates DynamoDB in-process; no Docker needed for unit tests
 - `respx` — mocks `httpx` calls to `api.fxratesapi.com`
 
@@ -464,8 +472,8 @@ Test each tool and storage function in complete isolation. All external dependen
 
 | Test file | Scenarios covered |
 |---|---|
-| `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` deletes all user items and checkpoint |
-| `test_expenses.py` | `add_expense` writes item with raw amount and currency; `edit_expense` updates only the specified fields; `delete_expense` removes correct item; `get_all_expenses` returns empty signal when no `TRIP#ACTIVE` exists |
+| `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` returns an error when no trip is active |
+| `test_expenses.py` | `add_expense` writes item with raw amount and currency; `edit_expense` updates only the specified fields; `delete_expense` removes correct item; `get_all_expenses` returns a no-expenses message when the user has none |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |
 | `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `query_by_prefix` work against moto |
 
@@ -503,18 +511,16 @@ Evaluates the agent's LLM-driven behaviour using **LangSmith**. This is not run 
   {
     "input": "spent 1200 yen at Ichiran ramen for dinner yesterday",
     "expected": {
-      "amount": 1200,
+      "amount": "1200",
       "currency": "JPY",
-      "merchant": "Ichiran",
-      "category": "Food & Dining"
+      "category": "Food"
     }
   },
   {
     "input": "paid $50 for taxi",
     "expected": {
-      "amount": 50,
+      "amount": "50",
       "currency": "SGD",
-      "merchant": null,
       "category": "Transport"
     }
   }
@@ -536,7 +542,7 @@ Evaluates the agent's LLM-driven behaviour using **LangSmith**. This is not run 
 | Evaluator | Type | Criteria |
 |---|---|---|
 | `field_extraction_accuracy` | Rule-based | Checks `amount`, `currency`, `category` match expected exactly |
-| `merchant_extraction` | LLM-as-judge | Claude grades whether the extracted merchant is reasonable given the input |
+| `summary_quality` | LLM-as-judge | Claude grades whether the generated `summary` reasonably describes the expense in the input |
 | `tool_correctness` | Rule-based | Checks the first tool called matches `expected_tool` |
 | `response_quality` | LLM-as-judge | Claude scores the bot's final reply on clarity and helpfulness (1–5) |
 | `end_trip_confirmation` | LLM-as-judge | Claude grades whether the agent correctly called or refused `end_trip` based on the user's confirmation message; covers ambiguous replies ("yeah sure", "actually wait no") |
@@ -582,12 +588,16 @@ pytest tests/unit/ --cov --cov-report=term-missing --cov-report=html
 ```toml
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=5.0",
-    "moto[dynamodb]>=5.0",
-    "respx>=0.21",
-    "langsmith>=0.1",
+    "boto3-stubs[dynamodb]>=1.43.27",
+    "moto[dynamodb]>=5.2.1",
+    "mypy>=2.1.0",
+    "pre-commit>=4.6.0",
+    "pydantic[mypy]>=2.13.4",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "respx>=0.23.1",
+    "ruff>=0.15.17",
 ]
 ```
 
@@ -596,17 +606,18 @@ dev = [
 ## Roadmap
 
 ### Phase 1 — Local Development
-- [ ] Project scaffolding: `uv init`, `pyproject.toml`, `.env`, `docker-compose.yml` for DynamoDB Local
-- [ ] `config.py` with pydantic-settings
+- [x] Project scaffolding: `uv init`, `pyproject.toml`, `.env`, `docker-compose.yml` for DynamoDB Local
+- [x] `config.py` with pydantic-settings
 - [ ] DynamoDB table creation script (run once locally and in prod)
-- [ ] Storage layer: `dynamodb.py` — low-level DynamoDB client wrapper
-- [ ] Tool implementations (trip, expenses, fx rate)
+- [x] Storage layer: `dynamodb.py` — low-level DynamoDB client wrapper
+- [x] Tool implementations (trip, expenses, fx rate)
 - [ ] Unit tests for all tools and storage layer (moto + respx); coverage ≥ 80%
 - [ ] Integration tests against DynamoDB Local
-- [ ] LangGraph graph: state, agent node, tools node, DynamoDB checkpointer
-- [ ] System prompt engineering
-- [ ] Telegram polling handler (local mode)
-- [ ] `end_trip` summary: text generation + matplotlib chart
+- [x] LangGraph graph: state, agent node, tools node, DynamoDB checkpointer
+- [x] System prompt engineering
+- [x] Telegram polling handler (local mode)
+- [x] `end_trip` summary: text generation + matplotlib chart
+- [ ] Clear conversation history when a trip ends (thread-per-trip `thread_id`, or checkpoint deletion) so `messages` does not accumulate across trips
 - [ ] Access control: `AUTH#<id>` DynamoDB items, PENDING/APPROVED/REJECTED states
 - [ ] Admin approval flow: unknown users trigger Approve/Reject message to admin via inline keyboard
 - [ ] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
@@ -694,7 +705,8 @@ uv run pre-commit run --all-files
 
 #### Roadmap items
 
-- [ ] `.pre-commit-config.yaml`: ruff (lint + format) + mypy
+- [x] `.pre-commit-config.yaml`: ruff (lint + format) + mypy
+- [ ] `[tool.coverage.run]` / `[tool.coverage.report]` sections in `pyproject.toml`; ratchet `fail_under` up from the current level towards 80
 - [ ] GitHub Actions `test.yml`: unit tests + coverage gate on every push/PR
 - [ ] GitHub Actions `deploy.yml`: OIDC credential federation, Lambda packaging, deploy on merge to main
 - [ ] IAM OIDC identity provider configured in AWS account
