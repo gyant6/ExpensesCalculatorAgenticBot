@@ -5,10 +5,15 @@ import io
 import logging
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+
+# Headless rendering: no display is available in Lambda or in CI. Set before any figure
+# is created, which only happens inside the functions below.
+matplotlib.use("Agg")
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +29,16 @@ _COLORS = [
     "#e34948",  # red
 ]
 
+CSV_FIELDNAMES = [
+    "date",
+    "summary",
+    "category",
+    "amount",
+    "currency",
+    "amount_sgd",
+    "payment_method",
+]
+
 _SURFACE = "#fcfcfb"
 _INK_PRIMARY = "#0b0b0b"
 _INK_SECONDARY = "#52514e"
@@ -31,7 +46,7 @@ _GRIDLINE = "#e1e0d9"
 
 
 def generate_charts(
-    expenses: list[dict],
+    expenses: list[dict[str, Any]],
     fx_rates: dict[str, float],
 ) -> tuple[bytes, bytes]:
     """Generate a pie chart (by category) and bar chart (by day) for a trip.
@@ -60,7 +75,7 @@ def generate_charts(
     return _pie_chart(category_totals), _bar_chart(date_totals)
 
 
-def _to_sgd(expense: dict, fx_rates: dict[str, float]) -> float | None:
+def _to_sgd(expense: dict[str, Any], fx_rates: dict[str, float]) -> float | None:
     """Convert an expense amount to SGD. Returns None if conversion is not possible."""
     currency = expense.get("currency", "")
     try:
@@ -159,16 +174,18 @@ def _bar_chart(date_totals: dict[str, float]) -> bytes:
     return _to_bytes(fig)
 
 
-def _to_bytes(fig: plt.Figure) -> bytes:
+def _to_bytes(fig: Figure) -> bytes:
     """Serialise a matplotlib figure to PNG bytes and close it."""
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    fig.savefig(
+        buf, format="png", dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor()
+    )
     plt.close(fig)
     buf.seek(0)
     return buf.read()
 
 
-def generate_csv(expenses: list[dict], fx_rates: dict[str, float]) -> bytes:
+def generate_csv(expenses: list[dict[str, Any]], fx_rates: dict[str, float]) -> bytes:
     """Generate a UTF-8 CSV of all expenses for the trip.
 
     Columns: date, summary, category, amount, currency, amount_sgd, payment_method.
@@ -185,16 +202,18 @@ def generate_csv(expenses: list[dict], fx_rates: dict[str, float]) -> bytes:
     buf = io.StringIO()
     writer = csv.DictWriter(
         buf,
-        fieldnames=["date", "summary", "category", "amount", "currency", "amount_sgd", "payment_method"],
+        fieldnames=CSV_FIELDNAMES,
         extrasaction="ignore",
     )
     writer.writeheader()
     for expense in expenses:
         sgd = _to_sgd(expense, fx_rates)
-        writer.writerow({
-            **expense,
-            "amount_sgd": f"{sgd:.2f}" if sgd is not None else "",
-        })
+        writer.writerow(
+            {
+                **expense,
+                "amount_sgd": f"{sgd:.2f}" if sgd is not None else "",
+            }
+        )
     return buf.getvalue().encode("utf-8")
 
 

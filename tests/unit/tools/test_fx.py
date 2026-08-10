@@ -3,39 +3,45 @@ import pytest
 import respx
 from httpx import Response
 
-from src.bot.tools.fx import get_sgd_exchange_rates
+from src.bot.tools.fx import FX_URL, get_sgd_exchange_rates
+
+QUERY_PARAMETERS = {"base": "SGD"}
 
 
 @respx.mock
-async def test_get_sgd_exchange_rates_sucessful() -> None:
-    query_parameters = {"base": "SGD"}
-    fx_url = "https://api.fxratesapi.com/latest"
+def test_get_sgd_exchange_rates_sucessful() -> None:
     mock_rate = {"JPY": 124.1}
-    respx.get(fx_url, params=query_parameters).mock(
+    respx.get(FX_URL, params=QUERY_PARAMETERS).mock(
         return_value=Response(200, json={"success": True, "rates": mock_rate})
     )
-    res = await get_sgd_exchange_rates()
+    res = get_sgd_exchange_rates()
 
     assert mock_rate == res
 
 
 @respx.mock
-async def test_get_sgd_exchange_rates_raises_on_http_error() -> None:
-    query_parameters = {"base": "SGD"}
-    fx_url = "https://api.fxratesapi.com/latest"
-    respx.get(fx_url, params=query_parameters).mock(return_value=Response(500))
+def test_get_sgd_exchange_rates_raises_on_http_error() -> None:
+    respx.get(FX_URL, params=QUERY_PARAMETERS).mock(return_value=Response(500))
 
     with pytest.raises(httpx.HTTPStatusError):
-        await get_sgd_exchange_rates()
+        get_sgd_exchange_rates()
 
 
 @respx.mock
-async def test_get_sgd_exchange_rates_raises_on_unsuccessful_response() -> None:
-    query_parameters = {"base": "SGD"}
-    fx_url = "https://api.fxratesapi.com/latest"
-    respx.get(fx_url, params=query_parameters).mock(
+def test_get_sgd_exchange_rates_raises_on_unsuccessful_response() -> None:
+    respx.get(FX_URL, params=QUERY_PARAMETERS).mock(
         return_value=Response(200, json={"success": False})
     )
 
     with pytest.raises(RuntimeError):
-        await get_sgd_exchange_rates()
+        get_sgd_exchange_rates()
+
+
+@respx.mock
+def test_get_sgd_exchange_rates_raises_when_rates_field_missing() -> None:
+    respx.get(FX_URL, params=QUERY_PARAMETERS).mock(
+        return_value=Response(200, json={"success": True})
+    )
+
+    with pytest.raises(RuntimeError):
+        get_sgd_exchange_rates()
