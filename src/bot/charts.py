@@ -1,5 +1,6 @@
-"""Pie and bar chart generation for trip expense summaries."""
+"""Pie and bar chart generation and CSV export for trip expense summaries."""
 
+import csv
 import io
 import logging
 from collections import defaultdict
@@ -165,6 +166,36 @@ def _to_bytes(fig: plt.Figure) -> bytes:
     plt.close(fig)
     buf.seek(0)
     return buf.read()
+
+
+def generate_csv(expenses: list[dict], fx_rates: dict[str, float]) -> bytes:
+    """Generate a UTF-8 CSV of all expenses for the trip.
+
+    Columns: date, summary, category, amount, currency, amount_sgd, payment_method.
+    amount_sgd is the SGD equivalent rounded to 2 decimal places; blank if the
+    currency rate is unavailable.
+
+    Args:
+        expenses: List of expense dicts as returned by query_by_prefix.
+        fx_rates: Exchange rates with SGD as base, used to populate amount_sgd.
+
+    Returns:
+        CSV content as UTF-8 encoded bytes, suitable for sending as a file attachment.
+    """
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=["date", "summary", "category", "amount", "currency", "amount_sgd", "payment_method"],
+        extrasaction="ignore",
+    )
+    writer.writeheader()
+    for expense in expenses:
+        sgd = _to_sgd(expense, fx_rates)
+        writer.writerow({
+            **expense,
+            "amount_sgd": f"{sgd:.2f}" if sgd is not None else "",
+        })
+    return buf.getvalue().encode("utf-8")
 
 
 def _placeholder(message: str) -> bytes:

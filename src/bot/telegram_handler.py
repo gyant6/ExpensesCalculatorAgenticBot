@@ -1,6 +1,7 @@
 """Telegram message and callback query handlers for the expenses bot."""
 
 import asyncio
+import io
 import logging
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -8,8 +9,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from src.bot.agent.graph import build_graph
-from src.bot.charts import generate_charts
-from src.bot.storage.dynamodb import query_by_prefix
+from src.bot.charts import generate_charts, generate_csv
+from src.bot.storage.dynamodb import delete_item, query_by_prefix
 from src.bot.tools.fx import get_sgd_exchange_rates
 
 logger = logging.getLogger(__name__)
@@ -133,16 +134,43 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if query.data == _END_TRIP_CONFIRM:
-        # Capture the AI summary before resuming — end_trip_node routes to END and
-        # deletes all expense data, so the pre-interrupt message is the one to show.
-        summary_content = _extract_text(state.values["messages"][-1].content) or "Trip ended."
-        pie_bytes, bar_bytes = await _generate_trip_charts(user_id)
-        await asyncio.to_thread(_graph.invoke, None, config)
-        await query.edit_message_text(summary_content, parse_mode=_parse_mode(summary_content))
+        pk = f"USER#{user_id}"
+        tool_call_id = state.values["messages"][-1].tool_calls[0]["id"]
+
+        # Fetch data while it still exists, generate reports
+        expenses = await asyncio.to_thread(query_by_prefix, pk, "EXPENSE#")
+        try:
+            fx_rates = await get_sgd_exchange_rates()
+            csv_bytes = generate_csv(expenses, fx_rates)
+            pie_bytes, bar_bytes = generate_charts(expenses, fx_rates)
+            tool_result = f"Trip successfully ended.\n\n{csv_bytes.decode('utf-8')}"
+        except Exception:
+            logger.exception("Failed to generate trip reports for user %s", user_id)
+            csv_bytes = pie_bytes = bar_bytes = None
+            tool_result = "Trip successfully ended."
+
+        # Delete trip data (replicating what end_trip tool does)
+        for expense in expenses:
+            await asyncio.to_thread(delete_item, pk, expense["SK"])
+        await asyncio.to_thread(delete_item, pk, "TRIP#ACTIVE")
+
+        # Inject the CSV as the end_trip tool result so the LLM can write an SGD summary
+        await asyncio.to_thread(
+            _graph.update_state,
+            config,
+            {"messages": [ToolMessage(content=tool_result, tool_call_id=tool_call_id)]},
+            "end_trip_node",
+        )
+
+        result = await asyncio.to_thread(_graph.invoke, None, config)
+        content = _extract_text(result["messages"][-1].content) or "Trip ended."
+        await query.edit_message_text(content, parse_mode=_parse_mode(content))
         if pie_bytes:
             await query.message.reply_photo(pie_bytes)
         if bar_bytes:
             await query.message.reply_photo(bar_bytes)
+        if csv_bytes:
+            await query.message.reply_document(io.BytesIO(csv_bytes), filename="expenses.csv")
     else:
         last_ai = state.values["messages"][-1]
         tool_call_id = last_ai.tool_calls[0]["id"]
@@ -161,26 +189,3 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(content, parse_mode=_parse_mode(content))
 
 
-async def _generate_trip_charts(user_id: str) -> tuple[bytes | None, bytes | None]:
-    """Fetch expenses and live FX rates, then generate pie and bar charts.
-
-    Must be called BEFORE the graph resumes end_trip_node, because that node
-    deletes all expense records from DynamoDB.
-
-    Args:
-        user_id: Telegram user ID string, used as the DynamoDB partition key suffix.
-
-    Returns:
-        Tuple of (pie_chart_bytes, bar_chart_bytes). Either or both may be None if
-        there are no expenses or if chart generation fails.
-    """
-    try:
-        expenses = await asyncio.to_thread(query_by_prefix, f"USER#{user_id}", "EXPENSE#")
-        if not expenses:
-            return None, None
-        fx_rates = await get_sgd_exchange_rates()
-        pie_bytes, bar_bytes = generate_charts(expenses, fx_rates)
-        return pie_bytes, bar_bytes
-    except Exception:
-        logger.exception("Failed to generate trip charts for user %s", user_id)
-        return None, None

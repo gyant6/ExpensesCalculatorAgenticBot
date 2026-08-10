@@ -49,10 +49,11 @@ end the current trip before starting a new one.
 - When a user asks you to modify an expense, you should call the tool edit_expense.
 - When a user asks you to delete an expense, you should call the tool delete_expense.
 - When the user asks you to end a trip, call the tool get_all_expenses and then immediately call the tool end_trip.
-  Do not ask for confirmation before calling end_trip.
-  You output these:
-  1. A numbered list of expenses, one per line, in this format: N. [description] - [amount] [currency] ([category], [date]).
-  2. A warm, conversational 2-3 sentence summary of the trip spending.
+  Do not ask for confirmation before calling end_trip. Do not generate a summary before calling end_trip.
+  After end_trip completes, you will receive a CSV of all expenses with an amount_sgd column showing each expense in SGD.
+  Use that data to output:
+  1. A friendly 2-3 sentence summary of the trip, including the total SGD spend.
+  2. A separate per-category breakdown: one line per category in the format "Category: SGD X.XX".
 """
 
     return prompt
