@@ -1,5 +1,6 @@
 """Compiled LangGraph agent graph for the expenses bot."""
 
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, START
 from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -10,22 +11,30 @@ from src.bot.agent.state import AgentState
 from src.bot.config import settings
 from src.bot.tools import expenses, trip
 
+# Node name shared with telegram_handler, which inspects graph.get_state(...).next to
+# detect that the graph is paused awaiting end_trip confirmation.
+END_TRIP_NODE = "end_trip_node"
+
 
 def custom_routes(state: AgentState) -> str:
     """Route after agent_node based on the last message's tool calls.
+
+    Args:
+        state: Current agent state; only the final entry of messages is inspected.
 
     Returns:
         "end_trip" if the LLM requested the end_trip tool (routed to end_trip_node,
         which is interrupted before execution for user confirmation), "tools" if any
         other tool was requested, or END if the LLM returned a plain text response.
+        Only an AIMessage can carry tool calls, so anything else also ends the turn.
     """
-    if not state["messages"][-1].tool_calls:
+    last_message = state["messages"][-1]
+    if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
         return END
-    if state["messages"][-1].tool_calls[0]["name"] == "end_trip":
+    if last_message.tool_calls[0]["name"] == trip.end_trip.name:
         return "end_trip"
-    else:
-        return "tools"
-    
+    return "tools"
+
 
 def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
     """Build and compile the LangGraph agent graph.
@@ -42,20 +51,30 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
 
     workflow.add_node("check_trip_status", check_trip_status)
     workflow.add_node("agent_node", agent_node)
-    workflow.add_node("tools_node", ToolNode([
-        trip.start_trip, expenses.add_expense, expenses.edit_expense,
-        expenses.delete_expense, expenses.get_all_expenses
-    ]))
-    workflow.add_node("end_trip_node", ToolNode([trip.end_trip]))
+    workflow.add_node(
+        "tools_node",
+        ToolNode(
+            [
+                trip.start_trip,
+                expenses.add_expense,
+                expenses.edit_expense,
+                expenses.delete_expense,
+                expenses.get_all_expenses,
+            ]
+        ),
+    )
+    workflow.add_node(END_TRIP_NODE, ToolNode([trip.end_trip]))
 
     workflow.add_edge(START, "check_trip_status")
     workflow.add_edge("check_trip_status", "agent_node")
 
     workflow.add_conditional_edges(
-        "agent_node", custom_routes, {"tools": "tools_node", "end_trip": "end_trip_node", END: END}
+        "agent_node",
+        custom_routes,
+        {"tools": "tools_node", "end_trip": END_TRIP_NODE, END: END},
     )
     workflow.add_edge("tools_node", "agent_node")
-    workflow.add_edge("end_trip_node", "agent_node")
+    workflow.add_edge(END_TRIP_NODE, "agent_node")
 
     checkpointer = DynamoDBSaver(
         table_name=settings.DYNAMODB_TABLE_NAME,
@@ -63,6 +82,8 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
         region_name=settings.AWS_REGION,
     )
 
-    graph = workflow.compile(checkpointer=checkpointer, interrupt_before=["end_trip_node"])
+    graph = workflow.compile(
+        checkpointer=checkpointer, interrupt_before=[END_TRIP_NODE]
+    )
 
     return graph

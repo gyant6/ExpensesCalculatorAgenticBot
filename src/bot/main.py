@@ -8,7 +8,12 @@ Usage:
 
 import logging
 
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 
 from src.bot.config import settings
 from src.bot.telegram_handler import handle_callback, handle_message

@@ -9,5 +9,3 @@ class AgentState(MessagesState):
     telegram_user_id: str
     message_date: str
     trip_start_date: NotRequired[str | None]
-    pie_chart_bytes: NotRequired[bytes | None]
-    bar_chart_bytes: NotRequired[bytes | None]
