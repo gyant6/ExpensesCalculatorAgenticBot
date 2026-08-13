@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from botocore.exceptions import ClientError
 
+from src.bot.config import settings
 from src.bot.storage import dynamodb
 
 if TYPE_CHECKING:
@@ -239,33 +240,42 @@ def test_query_by_prefix_returns_only_matching_items(
     assert dynamodb.query_by_prefix("USER#00000000", "EXPENSE#") == [expense]
 
 
-def test_query_by_prefix_returns_items_from_every_page(
-    monkeypatch: pytest.MonkeyPatch,
+def test_query_by_prefix_returns_all_items_across_the_1mb_page_boundary(
+    dynamodb_table: DynamoDBClient,
 ) -> None:
-    """A partition spanning several 1 MB pages must come back whole, not truncated.
+    """A partition larger than DynamoDB's 1 MB response cap must come back whole.
 
-    Real multi-page responses need over 1 MB of items, which is impractical in a unit
-    test, so the paginator is stubbed. This asserts the wrapper drains every page rather
-    than reading only the first — the behaviour that previously caused end_trip to orphan
-    expenses beyond the first page.
+    The cap is on bytes, not rows, so ~120 items with a padded source_message cross it
+    while keeping the test fast — padding that field is realistic, since edit_expense
+    appends to it on every edit. moto enforces the same limit as real DynamoDB: before
+    pagination a single query returned only 83 of these 120 items, which is how end_trip
+    could delete part of a trip and still remove TRIP#ACTIVE.
     """
-    fake = FakeClient(
-        [
-            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#1"}}]},
-            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#2"}}]},
-            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#3"}}]},
-        ]
-    )
-    monkeypatch.setattr(dynamodb, "get_client", lambda: fake)
+    padding = "x" * 12_000
+    total = 120
 
-    result = dynamodb.query_by_prefix("USER#1", "EXPENSE#")
+    for start in range(0, total, 25):
+        dynamodb_table.batch_write_item(
+            RequestItems={
+                settings.DYNAMODB_TABLE_NAME: [
+                    {
+                        "PutRequest": {
+                            "Item": {
+                                "PK": {"S": "USER#paged"},
+                                "SK": {"S": f"EXPENSE#{i:04d}"},
+                                "source_message": {"S": padding},
+                            }
+                        }
+                    }
+                    for i in range(start, min(start + 25, total))
+                ]
+            }
+        )
 
-    assert [item["SK"] for item in result] == ["EXPENSE#1", "EXPENSE#2", "EXPENSE#3"]
-    assert fake.requested == "query"
-    assert fake.paginator.call_kwargs["ExpressionAttributeValues"] == {
-        ":pk": {"S": "USER#1"},
-        ":prefix": {"S": "EXPENSE#"},
-    }
+    result = dynamodb.query_by_prefix("USER#paged", "EXPENSE#")
+
+    assert len(result) == total
+    assert [item["SK"] for item in result] == [f"EXPENSE#{i:04d}" for i in range(total)]
 
 
 def test_query_by_prefix_tolerates_a_page_without_items(

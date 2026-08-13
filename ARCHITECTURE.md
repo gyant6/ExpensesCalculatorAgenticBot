@@ -484,7 +484,7 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_config.py` | `LOG_LEVEL` is upper-cased and whitespace-stripped; the normalised value is accepted by `logging`; unknown levels raise `ValidationError` |
 | `test_expenses.py` | `add_expense` writes item with raw amount and currency; `edit_expense` updates only the specified fields; `delete_expense` removes correct item; `get_all_expenses` returns a no-expenses message when the user has none |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |
-| `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `query_by_prefix` work against moto |
+| `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `update_item`, `transact_write_delete_put` and `query_by_prefix` against moto; `query_by_prefix` returns every item across DynamoDB's 1 MB page boundary |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
 
@@ -631,7 +631,7 @@ dev = [
 - [ ] `ttl_seconds` on `DynamoDBSaver`, plus TTL enabled on the table itself, so abandoned threads expire with no active code path required
 - [ ] Prune checkpoint versions within a long trip: `checkpointer.prune([thread_id], strategy="keep_latest")` retains only the most recent checkpoint per namespace. Bounds storage but not token cost — the retained checkpoint still holds the full `messages` list
 - [x] Validate and upper-case `LOG_LEVEL` at settings load, so an invalid value fails with a message naming the setting and the accepted levels rather than a bare `ValueError` raised inside the logging module at import
-- [ ] Paginate `query_by_prefix`: a DynamoDB `query` returns at most 1 MB per call and the wrapper ignores `LastEvaluatedKey`, so beyond that it silently returns a partial list. `end_trip` would delete only what it saw while still removing `TRIP#ACTIVE`, orphaning the rest; `edit_expense` and `delete_expense` would index into a truncated list and act on the wrong row
+- [x] Paginate `query_by_prefix` via the boto3 paginator: a DynamoDB `query` returns at most 1 MB per call, and ignoring `LastEvaluatedKey` silently returned a partial list beyond that. Covered by a unit test that crosses the real 1 MB boundary — moto enforces the same cap, and a single query returned only 83 of 120 padded items
 - [ ] Store `amount` as a DynamoDB Number rather than String, using `Decimal` because boto3 refuses Python floats. Makes it numerically comparable and stops every consumer re-parsing it
 - [ ] Wire up or remove `AWS_BEDROCK_PROFILE` — declared in `config.py` and referenced nowhere, so setting it currently has no effect
 - [ ] Harden `custom_routes` to match any `end_trip` tool call rather than only `tool_calls[0]`. If the model ever emits `get_all_expenses` and `end_trip` in one message, the batch routes to `tools_node`, where `end_trip` is not bound, and the confirmation interrupt never fires
