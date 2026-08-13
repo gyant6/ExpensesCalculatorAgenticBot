@@ -124,6 +124,11 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
         table_name=settings.DYNAMODB_TABLE_NAME,
         endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
         region_name=settings.AWS_REGION,
+        # Each checkpoint is a full snapshot of the message history and one is written per
+        # graph step, so the same conversation is stored many times over. Compression cuts
+        # the DynamoDB write and read units that costs; it does not affect the tokens sent
+        # to Bedrock, which sees the state decompressed.
+        enable_checkpoint_compression=True,
     )
 
     graph = workflow.compile(
