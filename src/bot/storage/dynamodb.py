@@ -172,26 +172,36 @@ def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
     Used to retrieve all expenses for a user (prefix='EXPENSE#') or to check
     for an active trip (prefix='TRIP#').
 
+    A single DynamoDB query returns at most 1 MB of data, signalling that more remains by
+    returning a LastEvaluatedKey. This follows that key to exhaustion via the boto3
+    paginator, so callers always receive the whole partition instead of a silently
+    truncated first page: `end_trip` deletes every expense it is meant to, and the 1-based
+    positions that `edit_expense` and `delete_expense` accept always refer to the full
+    list.
+
     Args:
         pk: Partition key value (e.g. 'USER#123456789').
         prefix: Sort key prefix to filter by (e.g. 'EXPENSE#').
 
     Returns:
-        List of matching items as plain Python dicts. Empty list if none found.
+        List of matching items as plain Python dicts, in sort key order. Empty list if
+        none found.
 
     Raises:
-        botocore.exceptions.ClientError: If the DynamoDB request fails.
+        botocore.exceptions.ClientError: If any page of the DynamoDB query fails.
     """
-    response = get_client().query(
-        TableName=settings.DYNAMODB_TABLE_NAME,
-        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
-        ExpressionAttributeValues={":pk": {"S": pk}, ":prefix": {"S": prefix}},
+    pages = (
+        get_client()
+        .get_paginator("query")
+        .paginate(
+            TableName=settings.DYNAMODB_TABLE_NAME,
+            KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+            ExpressionAttributeValues={":pk": {"S": pk}, ":prefix": {"S": prefix}},
+        )
     )
 
-    low_level_data = response.get("Items", [])
-
-    items = [
+    return [
         {k: deserializer.deserialize(v) for k, v in item.items()}
-        for item in low_level_data
+        for page in pages
+        for item in page.get("Items", [])
     ]
-    return items
