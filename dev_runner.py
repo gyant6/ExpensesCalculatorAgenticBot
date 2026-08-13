@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
-from src.bot.agent.graph import build_graph
+from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
 
 SGT = ZoneInfo("Asia/Singapore")
 
@@ -31,7 +31,8 @@ def run(user_id: str) -> None:
         user_id: Simulated Telegram user ID string used as the DynamoDB thread key.
     """
     graph = build_graph()
-    config = {"configurable": {"thread_id": f"dev#{user_id}"}}
+    thread_id = f"dev#{user_id}"
+    config = {"configurable": {"thread_id": thread_id}}
 
     print(f"Dev runner — user_id={user_id}. Type 'exit' to quit.\n")
 
@@ -48,11 +49,13 @@ def run(user_id: str) -> None:
             break
 
         state = graph.get_state(config)
+        trip_ended = False
 
-        if "end_trip_node" in (state.next or ()):
+        if END_TRIP_NODE in (state.next or ()):
             # Graph is paused before end_trip_node — treat this turn as the confirmation.
             if user_input.lower() in ("y", "yes"):
                 result = graph.invoke(None, config)
+                trip_ended = True
             else:
                 last_ai = state.values["messages"][-1]
                 tool_call_id = last_ai.tool_calls[0]["id"]
@@ -82,14 +85,22 @@ def run(user_id: str) -> None:
 
         state_after = graph.get_state(config)
         if state_after.next:
-            print("Bot: [About to end your trip — type 'yes' to confirm or anything else to cancel]\n")
+            print(
+                "Bot: [About to end your trip — type 'yes' to confirm or anything else to cancel]\n"
+            )
         else:
             last_msg = result["messages"][-1]
             print(f"Bot: {last_msg.content}\n")
 
+        if trip_ended:
+            # After the summary has been printed — it was written from this history.
+            clear_thread_history(graph, thread_id)
+
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Dev runner for the expenses bot agent.")
+    parser = argparse.ArgumentParser(
+        description="Dev runner for the expenses bot agent."
+    )
     parser.add_argument(
         "--user-id",
         default="dev_user_1",

@@ -20,7 +20,7 @@ from telegram import (
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from src.bot.agent.graph import END_TRIP_NODE, build_graph
+from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
 from src.bot.charts import generate_charts, generate_csv
 from src.bot.storage.dynamodb import query_by_prefix
 from src.bot.tools.fx import get_sgd_exchange_rates
@@ -300,6 +300,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         content = _extract_text(result["messages"][-1].content) or "Trip ended."
         await query.edit_message_text(content, parse_mode=_parse_mode(content))
         await _send_attachments(query, pie_bytes, bar_bytes, csv_bytes)
+
+        # Only once the summary and files are delivered: this discards the history the
+        # summary was written from, and the next trip starts with a clean thread.
+        await asyncio.to_thread(clear_thread_history, _graph, user_id)
     else:
         last_ai = state.values["messages"][-1]
         tool_call_id = last_ai.tool_calls[0]["id"]
