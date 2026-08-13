@@ -60,6 +60,7 @@ ExpensesCalculatorAgenticBot/
     ├── conftest.py               # moto fixtures + table creation
     ├── unit/
     │   ├── __init__.py
+    │   ├── test_config.py
     │   ├── tools/
     │   │   ├── __init__.py
     │   │   ├── test_trip.py
@@ -255,7 +256,7 @@ This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` cal
 
 `end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
 
-Confirmation arrives as a callback query rather than as a new text message. `handle_callback` performs the deletion and report generation, injects the result as the tool message via `graph.update_state(..., as_node="end_trip_node")`, and resumes the graph so `agent_node` can write the summary. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
+Confirmation arrives as a callback query rather than as a new text message. `handle_callback` first renders the chart and CSV attachments from the still-live expense data, then resumes with `graph.invoke(None, config)` so `end_trip_node` genuinely executes: the tool performs the export and the deletion and returns the CSV that `agent_node` turns into a summary. Once that summary and the attachments have been delivered, the handler calls `clear_thread_history` to delete the thread's checkpoints. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
 
 ### State Definition
 
@@ -286,7 +287,7 @@ class AgentState(MessagesState):
 
 ## DynamoDB Table Design (Single-Table)
 
-**Table name:** `expenses-bot` (configurable via env)
+**Table name:** `ExpensesCalculator` (configurable via `DYNAMODB_TABLE_NAME`)
 
 **Primary key:** `PK` (String) + `SK` (String)
 
@@ -350,22 +351,25 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 ### 6. `end_trip`
 - **Input:** _(none beyond user_id)_
 - **Human-in-the-loop:** The graph is compiled with `interrupt_before=["end_trip_node"]`. This guarantees `end_trip` never executes on the same turn the LLM first decides to call it. The graph pauses, saves state to the checkpointer, and returns control to `handle_message`, which sends a Yes/No inline keyboard to the user.
-- **On confirm (`handle_callback`):** The handler takes over the deletion and report generation before the tool logically "runs":
-  1. Fetches all `EXPENSE#*` items from DynamoDB (still present at this point).
-  2. Calls `get_sgd_exchange_rates()` to get live FX rates.
-  3. Calls `generate_csv(expenses, fx_rates)` → CSV bytes with an `amount_sgd` column.
-  4. Calls `generate_charts(expenses, fx_rates)` → pie chart PNG (by category) + bar chart PNG (by day).
-  5. Deletes all `EXPENSE#*` items and the `TRIP#ACTIVE` item directly via DynamoDB.
-  6. Injects the CSV text as the `end_trip` tool result via `graph.update_state(..., as_node="end_trip_node")`.
-  7. Resumes the graph → `agent_node` sees the CSV as the tool result and generates a summary with total SGD spend and per-category breakdown.
-- **Returns (to LLM):** CSV of all expenses with SGD amounts (injected by handler, not the real tool return). The actual tool return value ("Trip successfully ended.") is never used.
+- **Action (once the node runs, after confirmation):**
+  1. Returns an error and deletes nothing if no `TRIP#ACTIVE` item exists.
+  2. Queries all `EXPENSE#*` items for the user.
+  3. Calls `get_sgd_exchange_rates()`. On failure it continues without rates rather than blocking the trip from ending.
+  4. Builds the CSV via `generate_csv(expenses, fx_rates)` — before any deletion, so a failed export leaves the trip intact rather than destroying records with no copy of them.
+  5. Deletes every `EXPENSE#*` item and the `TRIP#ACTIVE` item.
+- **Returns (to LLM):** A confirmation line followed by the CSV of all expenses, including the `amount_sgd` column, so the summary is written from real figures. If rates were unavailable, `amount_sgd` is blank and the CSV is prefixed with an instruction to give per-currency totals and state no SGD total — without that instruction the model invents an exchange rate to satisfy the system prompt's request for one.
+- **On confirm (`handle_callback`):**
+  1. Renders the charts and the CSV attachment from the live expense data. This must precede the resume, because the tool deletes that data.
+  2. Resumes the graph with `graph.invoke(None, config)`, which runs the node described above.
+  3. Sends the agent's summary text, then the two charts and `expenses.csv`.
+  4. Calls `clear_thread_history` to delete the thread's checkpoints.
 - **Sent to user:** LLM summary text → pie chart photo → bar chart photo → `expenses.csv` file attachment.
 
 ### 7. `get_sgd_exchange_rates`
 - **Input:** _(none)_
 - **Action:** `GET https://api.fxratesapi.com/latest?base=SGD`. Fetches all rates with SGD as the base.
 - **Returns:** `dict` mapping currency codes to their rate relative to SGD (e.g. `{"JPY": 167.5, "USD": 0.74}`). To convert a foreign amount to SGD: `sgd_amount = foreign_amount / rates[currency]`.
-- **Note:** Called by `handle_callback` in `telegram_handler.py` when the user confirms ending a trip. Not bound to the LLM.
+- **Note:** Synchronous, because its caller `end_trip` is a sync tool executing inside `graph.invoke` and cannot await. Called twice per trip end — once inside `end_trip` for the CSV, once in `_render_attachments` for the charts. Not bound to the LLM.
 
 ---
 
@@ -386,10 +390,14 @@ Example B — no currency mentioned, defaults to SGD:
                 category=Food, summary="Chicken rice at Maxwell"
   Stored as-is: amount=12, currency=SGD
 
-FX conversion happens once at end_trip:
+FX conversion happens at end_trip, never at write time:
   get_sgd_exchange_rates() → {"JPY": 167.5, ...}
   JPY expense: sgd_amount = 1200 / 167.5 = 7.16
   SGD expense: sgd_amount = 12 (no conversion)
+
+Rates are fetched twice per trip end — once inside end_trip for the CSV handed to the
+LLM, once in the handler for the charts. Both call the same function, so the figures
+cannot diverge in logic, only across the seconds between the two HTTP calls.
 ```
 
 ---
@@ -433,7 +441,7 @@ AWS_ACCESS_KEY_ID=          # local: from ~/.aws/credentials; Lambda: IAM role
 AWS_SECRET_ACCESS_KEY=      # local: from ~/.aws/credentials; Lambda: IAM role
 
 # DynamoDB
-DYNAMODB_TABLE_NAME=expenses-bot
+DYNAMODB_TABLE_NAME=ExpensesCalculator
 DYNAMODB_ENDPOINT_URL=http://localhost:8000   # remove this line in prod
 
 # App
@@ -464,7 +472,7 @@ Test each tool and storage function in complete isolation. All external dependen
 
 **Libraries:**
 - `pytest` — test runner
-- `pytest-asyncio` — async test support (`get_sgd_exchange_rates` and the Telegram handlers are async; the tools themselves are sync)
+- `pytest-asyncio` — async test support (the Telegram handlers are async; the tools and the FX fetch are sync)
 - `moto[dynamodb]` — intercepts boto3 calls and emulates DynamoDB in-process; no Docker needed for unit tests
 - `respx` — mocks `httpx` calls to `api.fxratesapi.com`
 
@@ -472,7 +480,8 @@ Test each tool and storage function in complete isolation. All external dependen
 
 | Test file | Scenarios covered |
 |---|---|
-| `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` returns an error when no trip is active |
+| `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` returns the CSV and deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` still exports and deletes when FX rates are unavailable, prefixing the no-SGD instruction; `end_trip` returns an error when no trip is active |
+| `test_config.py` | `LOG_LEVEL` is upper-cased and whitespace-stripped; the normalised value is accepted by `logging`; unknown levels raise `ValidationError` |
 | `test_expenses.py` | `add_expense` writes item with raw amount and currency; `edit_expense` updates only the specified fields; `delete_expense` removes correct item; `get_all_expenses` returns a no-expenses message when the user has none |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |
 | `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `query_by_prefix` work against moto |
@@ -618,9 +627,14 @@ dev = [
 - [x] Telegram polling handler (local mode)
 - [x] `end_trip` summary: text generation + matplotlib chart
 - [x] Clear conversation history when a trip ends: `graph.checkpointer.delete_thread(thread_id)`, called from `handle_callback` and `dev_runner` after the summary and attachments have been delivered. It cannot live inside `end_trip` — `agent_node` writes the summary after the tool returns and needs the message history to do it. Wrap it so a failed deletion cannot fail the user's turn after they already have their summary
-- [ ] `enable_checkpoint_compression=True` on `DynamoDBSaver` to shrink checkpoint items and buy headroom against the 400 KB item limit
+- [x] `enable_checkpoint_compression=True` on `DynamoDBSaver`, which gzips each snapshot before writing and expands it on read (measured ~4.6x). Reduces DynamoDB read and write units only — the state reaching Bedrock is decompressed and identical, so token cost is unchanged
 - [ ] `ttl_seconds` on `DynamoDBSaver`, plus TTL enabled on the table itself, so abandoned threads expire with no active code path required
 - [ ] Prune checkpoint versions within a long trip: `checkpointer.prune([thread_id], strategy="keep_latest")` retains only the most recent checkpoint per namespace. Bounds storage but not token cost — the retained checkpoint still holds the full `messages` list
+- [x] Validate and upper-case `LOG_LEVEL` at settings load, so an invalid value fails with a message naming the setting and the accepted levels rather than a bare `ValueError` raised inside the logging module at import
+- [ ] Paginate `query_by_prefix`: a DynamoDB `query` returns at most 1 MB per call and the wrapper ignores `LastEvaluatedKey`, so beyond that it silently returns a partial list. `end_trip` would delete only what it saw while still removing `TRIP#ACTIVE`, orphaning the rest; `edit_expense` and `delete_expense` would index into a truncated list and act on the wrong row
+- [ ] Store `amount` as a DynamoDB Number rather than String, using `Decimal` because boto3 refuses Python floats. Makes it numerically comparable and stops every consumer re-parsing it
+- [ ] Wire up or remove `AWS_BEDROCK_PROFILE` — declared in `config.py` and referenced nowhere, so setting it currently has no effect
+- [ ] Harden `custom_routes` to match any `end_trip` tool call rather than only `tool_calls[0]`. If the model ever emits `get_all_expenses` and `end_trip` in one message, the batch routes to `tools_node`, where `end_trip` is not bound, and the confirmation interrupt never fires
 - [ ] Access control: `AUTH#<id>` DynamoDB items, PENDING/APPROVED/REJECTED states
 - [ ] Admin approval flow: unknown users trigger Approve/Reject message to admin via inline keyboard
 - [ ] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
