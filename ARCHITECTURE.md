@@ -279,8 +279,8 @@ class AgentState(MessagesState):
 
 - `thread_id` = `str(telegram_user_id)`
 - LangGraph checkpointer (`langgraph-checkpoint-aws`, `DynamoDBSaver`) persists the full `messages` list to DynamoDB after every graph step
-- When a trip ends: `end_trip` tool deletes all expense/trip items AND deletes the checkpoint for this `thread_id`
-- When a trip starts: fresh checkpoint begins automatically on next message
+- When a trip ends: the `end_trip` tool deletes all expense and trip items, then the caller (`telegram_handler` or `dev_runner`) calls `clear_thread_history` to delete every checkpoint for this `thread_id`. The deletion cannot live in the tool — `agent_node` writes the summary after the tool returns, using the very history being deleted, so it runs only once the summary and attachments have been delivered
+- When a trip starts: a fresh checkpoint begins automatically on the next message
 
 ---
 
@@ -617,7 +617,7 @@ dev = [
 - [x] System prompt engineering
 - [x] Telegram polling handler (local mode)
 - [x] `end_trip` summary: text generation + matplotlib chart
-- [ ] Clear conversation history when a trip ends: `graph.checkpointer.delete_thread(thread_id)`, called from `handle_callback` and `dev_runner` after the summary and attachments have been delivered. It cannot live inside `end_trip` — `agent_node` writes the summary after the tool returns and needs the message history to do it. Wrap it so a failed deletion cannot fail the user's turn after they already have their summary
+- [x] Clear conversation history when a trip ends: `graph.checkpointer.delete_thread(thread_id)`, called from `handle_callback` and `dev_runner` after the summary and attachments have been delivered. It cannot live inside `end_trip` — `agent_node` writes the summary after the tool returns and needs the message history to do it. Wrap it so a failed deletion cannot fail the user's turn after they already have their summary
 - [ ] `enable_checkpoint_compression=True` on `DynamoDBSaver` to shrink checkpoint items and buy headroom against the 400 KB item limit
 - [ ] `ttl_seconds` on `DynamoDBSaver`, plus TTL enabled on the table itself, so abandoned threads expire with no active code path required
 - [ ] Prune checkpoint versions within a long trip: `checkpointer.prune([thread_id], strategy="keep_latest")` retains only the most recent checkpoint per namespace. Bounds storage but not token cost — the retained checkpoint still holds the full `messages` list

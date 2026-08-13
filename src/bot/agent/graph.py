@@ -1,6 +1,10 @@
 """Compiled LangGraph agent graph for the expenses bot."""
 
+import logging
+
+from botocore.exceptions import ClientError
 from langchain_core.messages import AIMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START
 from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -11,9 +15,49 @@ from src.bot.agent.state import AgentState
 from src.bot.config import settings
 from src.bot.tools import expenses, trip
 
+logger = logging.getLogger(__name__)
+
 # Node name shared with telegram_handler, which inspects graph.get_state(...).next to
 # detect that the graph is paused awaiting end_trip confirmation.
 END_TRIP_NODE = "end_trip_node"
+
+
+def clear_thread_history(
+    graph: CompiledStateGraph,  # type: ignore[type-arg]
+    thread_id: str,
+) -> None:
+    """Delete every checkpoint and pending write for one conversation thread.
+
+    Call this once a trip's summary has been delivered. `agent_node` replays the entire
+    `messages` list to Bedrock on every turn, so an ended trip's history would otherwise
+    inflate the cost and latency of every later message indefinitely, and grow the
+    checkpoint item towards DynamoDB's 400 KB per-item limit.
+
+    Must not be called before the summary is produced: the summary is written by
+    `agent_node` after `end_trip` returns, and it reads the history this deletes.
+
+    Failures are logged rather than raised. By the time this runs the user already has
+    their summary and the trip records are gone, so surfacing an error would report a
+    failure for work that has already succeeded.
+
+    Args:
+        graph: The compiled graph whose checkpointer holds the thread.
+        thread_id: The thread ID to clear, matching the one used in the graph config.
+    """
+    checkpointer = graph.checkpointer
+    if not isinstance(checkpointer, BaseCheckpointSaver):
+        logger.error(
+            "Graph has no checkpointer; conversation history for thread %s was not cleared.",
+            thread_id,
+        )
+        return
+
+    try:
+        checkpointer.delete_thread(thread_id)
+    except ClientError:
+        logger.exception(
+            "Failed to clear conversation history for thread %s", thread_id
+        )
 
 
 def custom_routes(state: AgentState) -> str:
