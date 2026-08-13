@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from botocore.exceptions import ClientError
@@ -9,6 +9,30 @@ from src.bot.storage import dynamodb
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb import DynamoDBClient
+
+
+class FakePaginator:
+    """Yields pre-canned query pages, standing in for boto3's real paginator."""
+
+    def __init__(self, pages: list[dict[str, Any]]) -> None:
+        self.pages = pages
+        self.call_kwargs: dict[str, Any] = {}
+
+    def paginate(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.call_kwargs = kwargs
+        return self.pages
+
+
+class FakeClient:
+    """Minimal stand-in for a boto3 DynamoDB client exposing only get_paginator."""
+
+    def __init__(self, pages: list[dict[str, Any]]) -> None:
+        self.paginator = FakePaginator(pages)
+        self.requested: str | None = None
+
+    def get_paginator(self, operation_name: str) -> FakePaginator:
+        self.requested = operation_name
+        return self.paginator
 
 
 def test_update_item_updates_existing_item(dynamodb_table: DynamoDBClient) -> None:
@@ -213,3 +237,50 @@ def test_query_by_prefix_returns_only_matching_items(
     dynamodb.put_item(trip)
 
     assert dynamodb.query_by_prefix("USER#00000000", "EXPENSE#") == [expense]
+
+
+def test_query_by_prefix_returns_items_from_every_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partition spanning several 1 MB pages must come back whole, not truncated.
+
+    Real multi-page responses need over 1 MB of items, which is impractical in a unit
+    test, so the paginator is stubbed. This asserts the wrapper drains every page rather
+    than reading only the first — the behaviour that previously caused end_trip to orphan
+    expenses beyond the first page.
+    """
+    fake = FakeClient(
+        [
+            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#1"}}]},
+            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#2"}}]},
+            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#3"}}]},
+        ]
+    )
+    monkeypatch.setattr(dynamodb, "get_client", lambda: fake)
+
+    result = dynamodb.query_by_prefix("USER#1", "EXPENSE#")
+
+    assert [item["SK"] for item in result] == ["EXPENSE#1", "EXPENSE#2", "EXPENSE#3"]
+    assert fake.requested == "query"
+    assert fake.paginator.call_kwargs["ExpressionAttributeValues"] == {
+        ":pk": {"S": "USER#1"},
+        ":prefix": {"S": "EXPENSE#"},
+    }
+
+
+def test_query_by_prefix_tolerates_a_page_without_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DynamoDB can return a page whose filter matched nothing while more pages remain."""
+    fake = FakeClient(
+        [
+            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#1"}}]},
+            {},
+            {"Items": [{"PK": {"S": "USER#1"}, "SK": {"S": "EXPENSE#2"}}]},
+        ]
+    )
+    monkeypatch.setattr(dynamodb, "get_client", lambda: fake)
+
+    result = dynamodb.query_by_prefix("USER#1", "EXPENSE#")
+
+    assert [item["SK"] for item in result] == ["EXPENSE#1", "EXPENSE#2"]
