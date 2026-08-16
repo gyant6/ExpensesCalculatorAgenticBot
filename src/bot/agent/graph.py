@@ -129,6 +129,9 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
         # the DynamoDB write and read units that costs; it does not affect the tokens sent
         # to Bedrock, which sees the state decompressed.
         enable_checkpoint_compression=True,
+        # Writes a `ttl` epoch attribute on every checkpoint. DynamoDB's TTL process
+        # deletes items past that timestamp, cleaning up abandoned threads automatically.
+        ttl_seconds=settings.CHECKPOINT_TTL_SECONDS,
     )
 
     graph = workflow.compile(

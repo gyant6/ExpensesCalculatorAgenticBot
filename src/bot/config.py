@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     DYNAMODB_TABLE_NAME: str
     DYNAMODB_ENDPOINT_URL: str | None = None
     ADMIN_TELEGRAM_ID: int
+    # Abandoned conversation threads are expired after this many seconds. The DynamoDBSaver
+    # writes a `ttl` epoch attribute on every checkpoint; DynamoDB's TTL process deletes
+    # items past that timestamp automatically. Defaults to 90 days.
+    CHECKPOINT_TTL_SECONDS: int = 7_776_000
 
     @field_validator("LOG_LEVEL")
     @classmethod
