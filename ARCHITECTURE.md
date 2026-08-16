@@ -194,23 +194,24 @@ Telegram user IDs are positive integers; group IDs are negative — the same `AU
 
 **Auth check logic (on every incoming message):**
 
-1. Look up `AUTH#<user_id>` (and `AUTH#<chat_id>` if the message is from a group).
-2. `APPROVED` → proceed normally.
-3. `PENDING` → reply "Your access request is already pending approval." Do nothing else.
-4. `REJECTED` → silently ignore.
-5. Not found → create `AUTH#<user_id>` with `status=PENDING`, then send an approval request to the admin.
+1. Determine scope: private chat → use `user_id`; group chat → use `chat_id` (negative).
+2. Look up `AUTH#<id>` for that scope only. Private and group approvals are independent — a user approved in a group is not approved for DMs, and vice versa.
+3. `APPROVED` → proceed normally.
+4. `PENDING` → reply "Your access request is still pending approval." Do nothing else.
+5. `REJECTED` → silently ignore.
+6. Not found → create `AUTH#<id>` with `status=PENDING`, then send an approval request to the admin.
 
 **Approval request sent to admin (Telegram ID `35153600`):**
 
 ```python
 keyboard = InlineKeyboardMarkup([
-    [InlineKeyboardButton("Approve", callback_data=json.dumps({"action": "auth:approve", "id": requester_id, "type": "USER"}))],
-    [InlineKeyboardButton("Reject",  callback_data=json.dumps({"action": "auth:reject",  "id": requester_id, "type": "USER"}))],
+    [InlineKeyboardButton("Approve", callback_data=f"auth:approve:{auth_id}")],
+    [InlineKeyboardButton("Reject",  callback_data=f"auth:reject:{auth_id}")],
 ])
-message = f"Access request from @{username} (ID: {requester_id})"
+message = f"Access request from {display_name} ({entity_type} ID: {auth_id})"
 ```
 
-Callback prefix `auth:` is handled by a dedicated `CallbackQueryHandler` in `main.py`, parallel to the existing `end_trip:` handler. On Approve/Reject, the handler updates `AUTH#<id>.status` in DynamoDB and notifies the requester.
+Callback prefix `auth:` is handled by a dedicated `CallbackQueryHandler` in `main.py`, parallel to the existing `end_trip:` handler. On Approve/Reject, the handler updates `AUTH#<id>.status` and `reviewed_at` in DynamoDB and notifies the requester.
 
 **Group extension:** Group and user approvals are independent scopes — being approved in a group does not grant direct message access, and vice versa.
 
@@ -447,6 +448,7 @@ DYNAMODB_ENDPOINT_URL=http://localhost:8000   # remove this line in prod
 # App
 LOG_LEVEL=INFO
 ENVIRONMENT=local   # or: production
+ADMIN_TELEGRAM_ID=   # Telegram user ID that receives access-request notifications
 
 # LangSmith (evals only — not required for the bot to run)
 LANGSMITH_API_KEY=your_langsmith_api_key_here
@@ -485,6 +487,7 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_expenses.py` | `add_expense` writes item with raw amount and currency; `edit_expense` updates only the specified fields; `delete_expense` removes correct item; `get_all_expenses` returns a no-expenses message when the user has none |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |
 | `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `update_item`, `transact_write_delete_put` and `query_by_prefix` against moto; `query_by_prefix` returns every item across DynamoDB's 1 MB page boundary |
+| `test_auth.py` | `_check_auth`: first contact creates PENDING and notifies admin; PENDING/REJECTED/APPROVED return correct bool and send correct replies; group uses negative chat ID; missing username falls back to full name. `handle_auth_callback`: approve/reject update DynamoDB status and notify requester; missing auth record edits message without sending notification; group approval notifies the group chat |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
 
@@ -635,11 +638,11 @@ dev = [
 - [ ] Store `amount` as a DynamoDB Number rather than String, using `Decimal` because boto3 refuses Python floats. Makes it numerically comparable and stops every consumer re-parsing it
 - [ ] Wire up or remove `AWS_BEDROCK_PROFILE` — declared in `config.py` and referenced nowhere, so setting it currently has no effect
 - [ ] Harden `custom_routes` to match any `end_trip` tool call rather than only `tool_calls[0]`. If the model ever emits `get_all_expenses` and `end_trip` in one message, the batch routes to `tools_node`, where `end_trip` is not bound, and the confirmation interrupt never fires
-- [ ] Access control: `AUTH#<id>` DynamoDB items, PENDING/APPROVED/REJECTED states
-- [ ] Admin approval flow: unknown users trigger Approve/Reject message to admin via inline keyboard
-- [ ] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
-- [ ] `ADMIN_TELEGRAM_ID` in config (env var / SSM in prod)
-- [ ] Manual end-to-end testing via Telegram
+- [x] Access control: `AUTH#<id>` DynamoDB items, PENDING/APPROVED/REJECTED states
+- [x] Admin approval flow: unknown users trigger Approve/Reject message to admin via inline keyboard
+- [x] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
+- [x] `ADMIN_TELEGRAM_ID` in config (env var / SSM in prod)
+- [x] Manual end-to-end testing via Telegram
 - [ ] LangSmith project setup; build initial eval datasets; run first eval baseline
 
 ### Phase 2 — CI/CD (GitHub Actions)

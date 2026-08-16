@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -22,7 +23,8 @@ from telegram.ext import ContextTypes
 
 from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
 from src.bot.charts import generate_charts, generate_csv
-from src.bot.storage.dynamodb import query_by_prefix
+from src.bot.config import settings
+from src.bot.storage.dynamodb import get_item, put_item, query_by_prefix, update_item
 from src.bot.tools.fx import get_sgd_exchange_rates
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,8 @@ logger = logging.getLogger(__name__)
 _graph = build_graph()
 _END_TRIP_CONFIRM = "end_trip:confirm"
 _END_TRIP_CANCEL = "end_trip:cancel"
+_AUTH_APPROVE_PREFIX = "auth:approve:"
+_AUTH_REJECT_PREFIX = "auth:reject:"
 
 # Fragment of the Telegram Bot API error returned when an edit would leave the message
 # unchanged. Matched on text because the API exposes no distinct error code for it.
@@ -74,16 +78,95 @@ def _extract_text(content: str | list[Any]) -> str:
     return "\n".join(texts)
 
 
+async def _check_auth(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    auth_id: str,
+    entity_type: str,
+    display_name: str,
+) -> bool:
+    """Check whether a user or group is authorised to use the bot.
+
+    On first contact, creates a PENDING record in DynamoDB and sends an Approve/Reject
+    keyboard to the admin. On subsequent contacts, returns immediately based on the
+    stored status without hitting the admin again.
+
+    Args:
+        update: The incoming Update, used to reply to the requester.
+        context: The PTB context, used to send the admin notification.
+        auth_id: The Telegram user ID (positive) or group chat ID (negative) being checked.
+        entity_type: "USER" or "GROUP".
+        display_name: Username or group title shown in the admin notification.
+
+    Returns:
+        True if the entity's status is APPROVED, False for PENDING, REJECTED, or new.
+
+    Raises:
+        botocore.exceptions.ClientError: If a DynamoDB operation fails.
+        telegram.error.TelegramError: If sending the admin notification fails.
+    """
+    auth_item = await asyncio.to_thread(get_item, f"AUTH#{auth_id}", "PROFILE")
+
+    if auth_item is None:
+        now = datetime.now(timezone.utc).isoformat()
+        await asyncio.to_thread(
+            put_item,
+            {
+                "PK": f"AUTH#{auth_id}",
+                "SK": "PROFILE",
+                "status": "PENDING",
+                "entity_type": entity_type,
+                "username": display_name,
+                "requested_at": now,
+            },
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Approve",
+                        callback_data=f"{_AUTH_APPROVE_PREFIX}{auth_id}",
+                    ),
+                    InlineKeyboardButton(
+                        "Reject",
+                        callback_data=f"{_AUTH_REJECT_PREFIX}{auth_id}",
+                    ),
+                ]
+            ]
+        )
+        await context.bot.send_message(
+            chat_id=settings.ADMIN_TELEGRAM_ID,
+            text=f"Access request from {display_name} ({entity_type} ID: {auth_id})",
+            reply_markup=keyboard,
+        )
+        if update.message:
+            await update.message.reply_text(
+                "You don't have access yet. A request has been sent for approval."
+            )
+        return False
+
+    status = auth_item.get("status")
+    if status == "APPROVED":
+        return True
+    if status == "PENDING":
+        if update.message:
+            await update.message.reply_text("Your access request is still pending approval.")
+        return False
+    # REJECTED: silently ignore
+    return False
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process an incoming Telegram text message through the agent graph.
 
-    Extracts the user ID, message date, and text from the Update, invokes the
-    agent graph, and sends the reply. If the graph interrupts before end_trip_node,
-    sends an inline Yes/No confirmation keyboard instead of the agent reply.
+    Runs the auth gate first. APPROVED entities proceed through the graph; others are
+    replied to or silently ignored according to their status. If the graph interrupts
+    before end_trip_node, sends an inline Yes/No confirmation keyboard instead of the
+    agent reply.
 
     Args:
         update: The incoming Telegram Update.
-        context: The PTB handler context (unused).
+        context: The PTB handler context.
 
     Raises:
         botocore.exceptions.ClientError: If a DynamoDB operation fails.
@@ -92,6 +175,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user_id = str(update.effective_user.id)
+    chat = update.effective_chat
+
+    if chat and chat.type in ("group", "supergroup"):
+        auth_id = str(chat.id)
+        entity_type = "GROUP"
+        display_name = chat.title or auth_id
+    else:
+        auth_id = user_id
+        entity_type = "USER"
+        raw_username = update.effective_user.username
+        display_name = (
+            f"@{raw_username}" if raw_username else (update.effective_user.full_name or user_id)
+        )
+
+    if not await _check_auth(update, context, auth_id, entity_type, display_name):
+        return
+
     message_date = update.message.date.strftime("%Y-%m-%d")
     config = _config(user_id)
 
@@ -245,7 +345,7 @@ async def _send_attachments(
         await message.reply_document(io.BytesIO(csv_bytes), filename=_CSV_FILENAME)
 
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process the Yes/No inline keyboard response for ending a trip.
 
     Resumes the graph after an end_trip_node interrupt. The keyboard is removed first so
@@ -258,7 +358,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     Args:
         update: The incoming Telegram Update containing a callback_query.
-        context: The PTB handler context (unused).
+        _context: Unused.
 
     Raises:
         botocore.exceptions.ClientError: If a DynamoDB operation fails.
@@ -324,3 +424,75 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         last_msg = result["messages"][-1]
         content = _extract_text(last_msg.content) or "Trip ending cancelled."
         await query.edit_message_text(content, parse_mode=_parse_mode(content))
+
+
+async def handle_auth_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process the admin's Approve/Reject decision for an access request.
+
+    Triggered when the admin taps the inline keyboard sent when an unknown entity first
+    contacts the bot. Updates the auth record in DynamoDB and notifies the requester.
+
+    Callback data format: "auth:approve:<auth_id>" or "auth:reject:<auth_id>".
+    auth_id is a positive integer for users and negative for groups, matching Telegram IDs.
+
+    Args:
+        update: The incoming Telegram Update containing a callback_query.
+        context: The PTB handler context (used to notify the requester).
+
+    Raises:
+        botocore.exceptions.ClientError: If a DynamoDB operation fails.
+        telegram.error.TelegramError: If a Telegram API call fails.
+    """
+    query = update.callback_query
+    if not query:
+        return
+
+    await query.answer()
+
+    data = query.data or ""
+    if data.startswith(_AUTH_APPROVE_PREFIX):
+        action = "approve"
+        auth_id = data[len(_AUTH_APPROVE_PREFIX):]
+    elif data.startswith(_AUTH_REJECT_PREFIX):
+        action = "reject"
+        auth_id = data[len(_AUTH_REJECT_PREFIX):]
+    else:
+        return
+
+    auth_item = await asyncio.to_thread(get_item, f"AUTH#{auth_id}", "PROFILE")
+    if not auth_item:
+        await query.edit_message_text("Auth record not found — it may have been removed.")
+        return
+
+    entity_type = auth_item.get("entity_type", "USER")
+    display_name = auth_item.get("username", auth_id)
+    now = datetime.now(timezone.utc).isoformat()
+
+    if action == "approve":
+        await asyncio.to_thread(
+            update_item,
+            f"AUTH#{auth_id}",
+            "PROFILE",
+            {"status": "APPROVED", "reviewed_at": now},
+        )
+        await context.bot.send_message(
+            chat_id=int(auth_id),
+            text="Your access has been approved! Start a new trip to start tracking your expenses!",
+        )
+        await query.edit_message_text(
+            f"Approved: {display_name} ({entity_type} ID: {auth_id})"
+        )
+    else:
+        await asyncio.to_thread(
+            update_item,
+            f"AUTH#{auth_id}",
+            "PROFILE",
+            {"status": "REJECTED", "reviewed_at": now},
+        )
+        await context.bot.send_message(
+            chat_id=int(auth_id),
+            text="Your access request has been rejected.",
+        )
+        await query.edit_message_text(
+            f"Rejected: {display_name} ({entity_type} ID: {auth_id})"
+        )
