@@ -166,6 +166,39 @@ def delete_item(pk: str, sk: str) -> None:
     )
 
 
+def scan_by_pk_prefix(prefix: str) -> list[dict[str, Any]]:
+    """Scan the table for all items whose partition key starts with a given prefix.
+
+    Unlike query_by_prefix, this crosses partition key boundaries, so it requires a full
+    table scan with a filter. Only suitable for admin operations on small result sets
+    (e.g. listing all AUTH# records) — never use for hot paths.
+
+    Args:
+        prefix: The PK prefix to filter by (e.g. 'AUTH#').
+
+    Returns:
+        List of matching items as plain Python dicts. Empty list if none found.
+
+    Raises:
+        botocore.exceptions.ClientError: If any page of the DynamoDB scan fails.
+    """
+    pages = (
+        get_client()
+        .get_paginator("scan")
+        .paginate(
+            TableName=settings.DYNAMODB_TABLE_NAME,
+            FilterExpression="begins_with(PK, :prefix)",
+            ExpressionAttributeValues={":prefix": {"S": prefix}},
+        )
+    )
+
+    return [
+        {k: deserializer.deserialize(v) for k, v in item.items()}
+        for page in pages
+        for item in page.get("Items", [])
+    ]
+
+
 def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
     """Fetch all items for a partition key whose sort key starts with a given prefix.
 

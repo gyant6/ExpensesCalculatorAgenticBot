@@ -11,12 +11,18 @@ import logging
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
+    CommandHandler,
     MessageHandler,
     filters,
 )
 
 from src.bot.config import settings
-from src.bot.telegram_handler import handle_auth_callback, handle_callback, handle_message
+from src.bot.telegram_handler import (
+    handle_admin_command,
+    handle_auth_callback,
+    handle_callback,
+    handle_message,
+)
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -29,6 +35,7 @@ def main() -> None:
     """Build the PTB application, register handlers, and start polling."""
     app = ApplicationBuilder().token(settings.TELEGRAM_BOT_TOKEN).build()
 
+    app.add_handler(CommandHandler("auth", handle_admin_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback, pattern="^end_trip:"))
     app.add_handler(CallbackQueryHandler(handle_auth_callback, pattern="^auth:"))

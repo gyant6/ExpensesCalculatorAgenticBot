@@ -643,6 +643,11 @@ dev = [
 - [x] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
 - [x] `ADMIN_TELEGRAM_ID` in config (env var / SSM in prod)
 - [x] Manual end-to-end testing via Telegram
+- [ ] Admin command interface: `/auth` is registered as a dedicated `CommandHandler`, which PTB routes directly without passing through `handle_message` or the auth gate. The handler silently ignores the command if `effective_user.id != ADMIN_TELEGRAM_ID` — this is the sole guard, since the auth gate never runs for command handlers. Supported commands:
+  - `/auth list` — list all `AUTH#*` records with their status, entity type, and username
+  - `/auth approve <id>` — set status to APPROVED
+  - `/auth reject <id>` — set status to REJECTED
+  - `/auth delete <id>` — delete the record entirely so the entity can re-apply from scratch
 - [ ] LangSmith project setup; build initial eval datasets; run first eval baseline
 
 ### Phase 2 — CI/CD (GitHub Actions)
