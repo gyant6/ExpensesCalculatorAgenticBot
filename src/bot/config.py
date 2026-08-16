@@ -1,15 +1,73 @@
 """Global application settings loaded via pydantic-settings.
 
-Reads from a local `.env` file when present (local dev), or from process
-environment variables (Lambda). All fields are required except
-DYNAMODB_ENDPOINT_URL, which defaults to None in prod so boto3 connects
-to real DynamoDB automatically.
+Local development: reads from a `.env` file.
+Production (Lambda): non-sensitive values come from Lambda environment variables;
+    sensitive values (TELEGRAM_BOT_TOKEN, ADMIN_TELEGRAM_ID) are fetched from
+    AWS SSM Parameter Store at startup. The Lambda environment variables
+    TELEGRAM_BOT_TOKEN_SSM_PATH and ADMIN_TELEGRAM_ID_SSM_PATH hold the SSM
+    parameter names — the actual secrets never appear in Lambda configuration.
 """
 
 import logging
+import os
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# SSM fields: env var that holds the path → env var that receives the value.
+_SSM_FIELDS: dict[str, str] = {
+    "TELEGRAM_BOT_TOKEN_SSM_PATH": "TELEGRAM_BOT_TOKEN",
+    "ADMIN_TELEGRAM_ID_SSM_PATH": "ADMIN_TELEGRAM_ID",
+}
+
+
+def _load_ssm_secrets() -> None:
+    """Fetch sensitive settings from SSM and inject them into os.environ.
+
+    Only runs when ENVIRONMENT=production. Reads SSM parameter paths from
+    dedicated *_SSM_PATH environment variables, fetches their values in a single
+    batch call, and writes the results back into os.environ so pydantic-settings
+    can read them in the normal way.
+
+    Raises:
+        RuntimeError: If any expected SSM parameter path env var is set but the
+            corresponding parameter is missing from SSM (indicates a deployment
+            misconfiguration rather than a transient error).
+        botocore.exceptions.ClientError: If the SSM API call fails (IAM
+            permission denied, network error, etc.).
+    """
+    if os.environ.get("ENVIRONMENT") != "production":
+        return
+
+    import boto3
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    ssm = boto3.client("ssm", region_name=region)
+
+    paths: dict[str, str] = {}
+    for path_env, value_env in _SSM_FIELDS.items():
+        path = os.environ.get(path_env)
+        if path:
+            paths[path] = value_env
+
+    if not paths:
+        return
+
+    response = ssm.get_parameters(Names=list(paths.keys()), WithDecryption=True)
+    found = {p["Name"]: p["Value"] for p in response["Parameters"]}
+
+    missing = [name for name in paths if name not in found]
+    if missing:
+        raise RuntimeError(
+            f"SSM parameters not found: {missing}. Verify they exist and the "
+            "Lambda execution role has ssm:GetParameters permission."
+        )
+
+    for ssm_path, value_env in paths.items():
+        os.environ[value_env] = found[ssm_path]
+
+
+_load_ssm_secrets()
 
 
 class Settings(BaseSettings):

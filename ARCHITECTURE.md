@@ -653,15 +653,18 @@ dev = [
 Tackled in order so the bot is running in prod as early as possible, with security hardening layered on after.
 
 #### Step 1 — Lambda handler (code only, no AWS resources yet)
-- [ ] Adapt `main.py` to support webhook mode: detect `ENVIRONMENT=production`, parse the Telegram JSON payload from the API Gateway event, respond synchronously. Polling mode continues to work unchanged for local dev.
-- [ ] Validate handler locally with a synthetic API Gateway event payload before provisioning anything.
+- [x] Adapt `main.py` to support webhook mode: `lambda_handler(event, context)` parses the Telegram JSON from the API Gateway event body and dispatches via PTB. Polling mode (`if __name__ == "__main__"`) continues to work unchanged for local dev. Both modes share `_build_app()` so handler registration is never duplicated.
+- [x] Validate handler locally with a synthetic API Gateway event payload before provisioning anything.
 
 #### Step 2 — Core infrastructure (Terraform)
-- [ ] Terraform: Lambda function + IAM execution role (DynamoDB read/write + Bedrock invoke, least-privilege)
-- [ ] Terraform: prod DynamoDB table (same key schema as local, TTL enabled on `ttl` attribute)
-- [ ] Terraform: SSM Parameter Store entries for all secrets (`TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`, etc.)
-- [ ] Lambda packaging: `uv export --no-dev` → pip install → zip
-- [ ] Deploy and smoke-test: invoke Lambda directly with the synthetic payload
+- [x] Terraform: Lambda function + IAM execution role (DynamoDB read/write + Bedrock invoke, SSM GetParameters — least-privilege)
+- [x] Terraform: prod DynamoDB table (same key schema as local, TTL enabled on `ttl` attribute)
+- [x] Sensitive secrets (`TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`) are stored in SSM Parameter Store as SecureString — values set manually via CLI, never managed by Terraform. Lambda env vars hold the SSM paths (`TELEGRAM_BOT_TOKEN_SSM_PATH`, `ADMIN_TELEGRAM_ID_SSM_PATH`); `config.py` fetches and injects them into `os.environ` before pydantic-settings loads, only when `ENVIRONMENT=production`.
+- [x] Lambda packaging: `scripts/build_lambda.sh` — `uv export --no-dev` → pip install → zip dependencies + src/
+- [ ] Put SSM secrets: `aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --value "<token>" --type SecureString --region ap-southeast-1` (and same for admin-telegram-id)
+- [ ] Build zip: `bash scripts/build_lambda.sh`
+- [ ] Deploy: `terraform apply`
+- [ ] Smoke-test: invoke Lambda directly with a synthetic payload via `aws lambda invoke`
 
 #### Step 3 — API Gateway + webhook
 - [ ] Terraform: HTTP API Gateway (POST /webhook → Lambda integration)
