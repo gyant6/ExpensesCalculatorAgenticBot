@@ -120,7 +120,7 @@ async def test_approved_returns_true_without_any_message() -> None:
     context.bot.send_message.assert_not_awaited()
 
 
-async def test_rejected_returns_false_silently() -> None:
+async def test_rejected_returns_false_and_replies_without_notifying_admin() -> None:
     update = _make_update()
     context = _make_context()
 
@@ -128,7 +128,7 @@ async def test_rejected_returns_false_silently() -> None:
         result = await _check_auth(update, context, "111", "USER", "@testuser")
 
     assert result is False
-    update.message.reply_text.assert_not_awaited()
+    update.message.reply_text.assert_awaited_once()
     context.bot.send_message.assert_not_awaited()
 
 

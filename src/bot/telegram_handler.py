@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from botocore.exceptions import ClientError
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
@@ -24,7 +25,14 @@ from telegram.ext import ContextTypes
 from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
 from src.bot.charts import generate_charts, generate_csv
 from src.bot.config import settings
-from src.bot.storage.dynamodb import get_item, put_item, query_by_prefix, update_item
+from src.bot.storage.dynamodb import (
+    delete_item,
+    get_item,
+    put_item,
+    query_by_prefix,
+    scan_by_pk_prefix,
+    update_item,
+)
 from src.bot.tools.fx import get_sgd_exchange_rates
 
 logger = logging.getLogger(__name__)
@@ -145,14 +153,10 @@ async def _check_auth(
             )
         return False
 
-    status = auth_item.get("status")
-    if status == "APPROVED":
+    if auth_item.get("status") == "APPROVED":
         return True
-    if status == "PENDING":
-        if update.message:
-            await update.message.reply_text("Your access request is still pending approval.")
-        return False
-    # REJECTED: silently ignore
+    if update.message:
+        await update.message.reply_text("You don't have access yet. A request has been sent for approval.")
     return False
 
 
@@ -495,4 +499,92 @@ async def handle_auth_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await query.edit_message_text(
             f"Rejected: {display_name} ({entity_type} ID: {auth_id})"
+        )
+
+
+async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /auth admin commands sent directly to the bot.
+
+    PTB routes CommandHandlers separately from MessageHandlers, so this function is never
+    reached via handle_message and the auth gate never runs for it. The admin ID check
+    here is the sole guard.
+
+    Subcommands (passed as context.args):
+        list                — list all AUTH# records with status, type, name, and ID
+        approve <id>        — set the record's status to APPROVED
+        reject <id>         — set the record's status to REJECTED
+        delete <id>         — delete the record so the entity can re-apply from scratch
+
+    Args:
+        update: The incoming Telegram Update.
+        context: The PTB handler context; context.args holds the subcommand and arguments.
+
+    Raises:
+        botocore.exceptions.ClientError: If a DynamoDB operation fails (excluding
+            ConditionalCheckFailedException on approve/reject, which is handled inline).
+        telegram.error.TelegramError: If a Telegram API call fails.
+    """
+    if not update.effective_user or update.effective_user.id != settings.ADMIN_TELEGRAM_ID:
+        return
+    if not update.message:
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/auth list\n"
+            "/auth approve <id>\n"
+            "/auth reject <id>\n"
+            "/auth delete <id>"
+        )
+        return
+
+    subcommand = args[0]
+
+    if subcommand == "list":
+        records = await asyncio.to_thread(scan_by_pk_prefix, "AUTH#")
+        if not records:
+            await update.message.reply_text("No auth records found.")
+            return
+        lines = ["Status | Type | Name (ID)"]
+        for r in sorted(records, key=lambda x: x.get("username", "")):
+            auth_id = r["PK"].removeprefix("AUTH#")
+            lines.append(
+                f"{r.get('status', '?')} | {r.get('entity_type', '?')} | "
+                f"{r.get('username', '?')} ({auth_id})"
+            )
+        await update.message.reply_text("\n".join(lines))
+
+    elif subcommand in ("approve", "reject", "delete"):
+        if len(args) < 2:
+            await update.message.reply_text(f"Usage: /auth {subcommand} <id>")
+            return
+        auth_id = args[1]
+        pk = f"AUTH#{auth_id}"
+
+        if subcommand == "delete":
+            await asyncio.to_thread(delete_item, pk, "PROFILE")
+            await update.message.reply_text(f"Deleted auth record for ID {auth_id}.")
+        else:
+            new_status = "APPROVED" if subcommand == "approve" else "REJECTED"
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                await asyncio.to_thread(
+                    update_item, pk, "PROFILE", {"status": new_status, "reviewed_at": now}
+                )
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    await update.message.reply_text(f"No auth record found for ID {auth_id}.")
+                    return
+                raise
+            await update.message.reply_text(f"Set {auth_id} to {new_status}.")
+
+    else:
+        await update.message.reply_text(
+            "Unknown subcommand. Usage:\n"
+            "/auth list\n"
+            "/auth approve <id>\n"
+            "/auth reject <id>\n"
+            "/auth delete <id>"
         )
