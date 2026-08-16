@@ -310,7 +310,7 @@ class AgentState(MessagesState):
 | `source_message` | String | `1200 yen at Ichiran ramen for dinner` |
 | `category` | String | `Food` |
 | `currency` | String | `JPY` |
-| `amount` | String | `1200` |
+| `amount` | Number (Decimal) | `1200` |
 | `summary` | String | `Dinner at Ichiran ramen` |
 | `payment_method` | String | `Cash` |
 | `updated_at` | String (ISO-8601) | `2026-06-04T13:45:00.000000+00:00` |
@@ -437,7 +437,6 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 # AWS
 AWS_REGION=ap-southeast-2
 AWS_BEDROCK_MODEL_ID=global.anthropic.claude-haiku-4-5-20251001-v1:0
-AWS_BEDROCK_PROFILE=        # optional; named AWS profile for local Bedrock calls
 AWS_ACCESS_KEY_ID=          # local: from ~/.aws/credentials; Lambda: IAM role
 AWS_SECRET_ACCESS_KEY=      # local: from ~/.aws/credentials; Lambda: IAM role
 
@@ -649,7 +648,25 @@ dev = [
   - `/auth delete <id>` — delete the record entirely so the entity can re-apply from scratch
 - [ ] LangSmith project setup; build initial eval datasets; run first eval baseline
 
-### Phase 2 — CI/CD (GitHub Actions)
+### Phase 2 — AWS Deployment
+- [ ] DynamoDB table creation script (run once in prod to create the table with correct key schema, billing mode, and TTL attribute)
+- [ ] Lambda handler (`main.py` webhook mode)
+- [ ] API Gateway setup (POST /webhook)
+- [ ] API Gateway resource policy: IP allowlist from Telegram's CIDR ranges
+- [ ] API Gateway webhook secret token (`X-Telegram-Bot-Api-Secret-Token`) validation in handler
+- [ ] Register Telegram webhook URL with BotFather (set `secret_token` at registration time)
+- [ ] IAM role with least-privilege DynamoDB + Bedrock permissions
+- [ ] Lambda packaging via `uv export --no-dev` + zip or container image
+- [ ] Environment variables in Lambda (no `.env` file — use SSM Parameter Store or Lambda env vars)
+- [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps API Gateway IP allowlist in sync with Telegram's published ranges)
+- [ ] IAM role for CIDR updater Lambda scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
+- [ ] CloudWatch structured logging validation
+- [ ] Bedrock Guardrails — denied topics policy to block off-topic requests (financial advice, general chat, etc.) and keep the agent scoped to expense tracking
+- [ ] Bedrock Guardrails — prompt attack filter to detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
+
+---
+
+### Phase 3 — CI/CD (GitHub Actions)
 
 **Philosophy:** GitHub Actions is the CI/CD platform for this project. Concepts (pipelines, secrets management, environment promotion, deploy gates, OIDC credential federation) transfer directly to Jenkins or AWS CodePipeline — without the overhead of maintaining a CI server.
 
@@ -736,24 +753,6 @@ uv run pre-commit run --all-files
 - [ ] IAM OIDC identity provider configured in AWS account
 - [ ] Deploy IAM role with trust policy scoped to this repo + main branch
 - [ ] Manual approval gate before prod deploy (GitHub Actions environment protection rule)
-
----
-
-### Phase 3 — AWS Deployment
-- [ ] DynamoDB table creation script (run once in prod to create the table with correct key schema, billing mode, and TTL attribute)
-- [ ] Lambda handler (`main.py` webhook mode)
-- [ ] API Gateway setup (POST /webhook)
-- [ ] API Gateway resource policy: IP allowlist from Telegram's CIDR ranges
-- [ ] API Gateway webhook secret token (`X-Telegram-Bot-Api-Secret-Token`) validation in handler
-- [ ] Register Telegram webhook URL with BotFather (set `secret_token` at registration time)
-- [ ] IAM role with least-privilege DynamoDB + Bedrock permissions
-- [ ] Lambda packaging via `uv export --no-dev` + zip or container image
-- [ ] Environment variables in Lambda (no `.env` file — use SSM Parameter Store or Lambda env vars)
-- [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps API Gateway IP allowlist in sync with Telegram's published ranges)
-- [ ] IAM role for CIDR updater Lambda scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
-- [ ] CloudWatch structured logging validation
-- [ ] Bedrock Guardrails — denied topics policy to block off-topic requests (financial advice, general chat, etc.) and keep the agent scoped to expense tracking
-- [ ] Bedrock Guardrails — prompt attack filter to detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
 
 ### Phase 4 — Enhancements (future)
 - [ ] Receipt image parsing (user sends photo, agent extracts expense via vision)
