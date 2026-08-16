@@ -659,11 +659,11 @@ Tackled in order so the bot is running in prod as early as possible, with securi
 #### Step 2 — Core infrastructure (Terraform)
 - [x] Terraform: Lambda function + IAM execution role (DynamoDB read/write + Bedrock invoke, SSM GetParameters — least-privilege)
 - [x] Terraform: prod DynamoDB table (same key schema as local, TTL enabled on `ttl` attribute)
-- [x] Sensitive secrets (`TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`) are stored in SSM Parameter Store as SecureString — values set manually via CLI, never managed by Terraform. Lambda env vars hold the SSM paths (`TELEGRAM_BOT_TOKEN_SSM_PATH`, `ADMIN_TELEGRAM_ID_SSM_PATH`); `config.py` fetches and injects them into `os.environ` before pydantic-settings loads, only when `ENVIRONMENT=production`.
+- [x] Sensitive secrets (`TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`) are stored in SSM Parameter Store as SecureString. Terraform creates the parameters with a `REPLACE_ME` placeholder and `ignore_changes = [value]`, so the real value set via CLI is never overwritten by a subsequent apply and never stored in Terraform state. Lambda env vars hold the SSM paths; `config.py` fetches and injects them into `os.environ` before pydantic-settings loads, only when `ENVIRONMENT=production`.
 - [x] Lambda packaging: `scripts/build_lambda.sh` — `uv export --no-dev` → pip install → zip dependencies + src/
-- [ ] Put SSM secrets: `aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --value "<token>" --type SecureString --region ap-southeast-1` (and same for admin-telegram-id)
 - [ ] Build zip: `bash scripts/build_lambda.sh`
 - [ ] Deploy: `terraform apply`
+- [ ] Set real SSM values: `aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --value "<token>" --type SecureString --overwrite --region ap-southeast-1` (and same for admin-telegram-id)
 - [ ] Smoke-test: invoke Lambda directly with a synthetic payload via `aws lambda invoke`
 
 #### Step 3 — API Gateway + webhook

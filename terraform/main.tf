@@ -43,17 +43,39 @@ resource "aws_dynamodb_table" "expenses" {
 }
 
 # ── SSM Parameter Store (secrets) ─────────────────────────────────────────────
-# Values are NOT managed by Terraform — set them once manually:
-#   aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token \
-#     --value "<token>" --type SecureString --region ap-southeast-1
-#   aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/admin-telegram-id \
-#     --value "<id>" --type SecureString --region ap-southeast-1
+# Terraform creates the parameters with a placeholder value and then ignores
+# the value field, so the real secret you set via the AWS console or CLI is
+# never overwritten by a subsequent terraform apply and never stored in state.
 #
-# Terraform only declares the names so IAM policies can reference exact ARNs.
+# After terraform apply, set the real values once:
+#   aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token \
+#     --value "<token>" --type SecureString --overwrite --region ap-southeast-1
+#   aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/admin-telegram-id \
+#     --value "<id>" --type SecureString --overwrite --region ap-southeast-1
 
 locals {
   ssm_telegram_bot_token_path = "/ExpensesCalculatorAgenticBot/telegram-bot-token"
   ssm_admin_telegram_id_path  = "/ExpensesCalculatorAgenticBot/admin-telegram-id"
+}
+
+resource "aws_ssm_parameter" "telegram_bot_token" {
+  name  = local.ssm_telegram_bot_token_path
+  type  = "SecureString"
+  value = "REPLACE_ME"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+resource "aws_ssm_parameter" "admin_telegram_id" {
+  name  = local.ssm_admin_telegram_id_path
+  type  = "SecureString"
+  value = "REPLACE_ME"
+
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
 # ── IAM — Lambda execution role ───────────────────────────────────────────────
