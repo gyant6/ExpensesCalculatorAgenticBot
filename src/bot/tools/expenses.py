@@ -101,7 +101,7 @@ def add_expense(
             "source_message": source_message,
             "summary": summary,
             "category": category,
-            "amount": amount,
+            "amount": Decimal(amount),
             "currency": currency,
             "date": date,
             "payment_method": payment_method,
@@ -175,7 +175,7 @@ def edit_expense(
         if not check_valid_amount(amount):
             return "amount must be a valid positive number (e.g. '1200' or '12.50') and should not be 0."
         else:
-            edited_fields["amount"] = amount
+            edited_fields["amount"] = Decimal(amount)
 
     if currency:
         edited_fields["currency"] = currency

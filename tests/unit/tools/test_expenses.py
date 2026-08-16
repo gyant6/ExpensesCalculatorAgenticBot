@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -36,6 +37,7 @@ def test_add_expense(
     item = dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", f"EXPENSE#{datetime_now}")
     assert item == {
         **base_expense,
+        "amount": Decimal(base_expense["amount"]),
         "PK": f"USER#{TELEGRAM_USER_ID}",
         "SK": f"EXPENSE#{datetime_now}",
         "payment_method": "Card",
@@ -65,6 +67,7 @@ def test_add_expense_default_payment_method(
     item = dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", f"EXPENSE#{datetime_now}")
     assert item == {
         **base_expense,
+        "amount": Decimal(base_expense["amount"]),
         "PK": f"USER#{TELEGRAM_USER_ID}",
         "SK": f"EXPENSE#{datetime_now}",
         "payment_method": "Cash",
@@ -215,7 +218,7 @@ def test_edit_expense_no_date_change_multiple_fields(
         "summary": edit_fields["summary"],
         "currency": edit_fields["currency"],
         "category": edit_fields["category"],
-        "amount": edit_fields["amount"],
+        "amount": Decimal(edit_fields["amount"]),
         "payment_method": edit_fields["payment_method"],
         "updated_at": update_datetime.isoformat(timespec="microseconds"),
     }
