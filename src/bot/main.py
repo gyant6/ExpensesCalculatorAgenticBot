@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 from src.bot.config import settings
-from src.bot.telegram_handler import handle_callback, handle_message
+from src.bot.telegram_handler import handle_auth_callback, handle_callback, handle_message
 
 logging.basicConfig(
     level=settings.LOG_LEVEL,
@@ -31,6 +31,7 @@ def main() -> None:
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback, pattern="^end_trip:"))
+    app.add_handler(CallbackQueryHandler(handle_auth_callback, pattern="^auth:"))
 
     logger.info("Starting bot in polling mode.")
     app.run_polling()

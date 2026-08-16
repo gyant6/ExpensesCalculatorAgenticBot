@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str
     DYNAMODB_TABLE_NAME: str
     DYNAMODB_ENDPOINT_URL: str | None = None
+    ADMIN_TELEGRAM_ID: int
 
     @field_validator("LOG_LEVEL")
     @classmethod
