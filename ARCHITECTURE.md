@@ -649,20 +649,35 @@ dev = [
 - [ ] LangSmith project setup; build initial eval datasets; run first eval baseline
 
 ### Phase 2 — AWS Deployment
-- [ ] DynamoDB table creation script (run once in prod to create the table with correct key schema, billing mode, and TTL attribute)
-- [ ] Lambda handler (`main.py` webhook mode)
-- [ ] API Gateway setup (POST /webhook)
-- [ ] API Gateway resource policy: IP allowlist from Telegram's CIDR ranges
-- [ ] API Gateway webhook secret token (`X-Telegram-Bot-Api-Secret-Token`) validation in handler
-- [ ] Register Telegram webhook URL with BotFather (set `secret_token` at registration time)
-- [ ] IAM role with least-privilege DynamoDB + Bedrock permissions
-- [ ] Lambda packaging via `uv export --no-dev` + zip or container image
-- [ ] Environment variables in Lambda (no `.env` file — use SSM Parameter Store or Lambda env vars)
-- [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps API Gateway IP allowlist in sync with Telegram's published ranges)
-- [ ] IAM role for CIDR updater Lambda scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
+
+Tackled in order so the bot is running in prod as early as possible, with security hardening layered on after.
+
+#### Step 1 — Lambda handler (code only, no AWS resources yet)
+- [ ] Adapt `main.py` to support webhook mode: detect `ENVIRONMENT=production`, parse the Telegram JSON payload from the API Gateway event, respond synchronously. Polling mode continues to work unchanged for local dev.
+- [ ] Validate handler locally with a synthetic API Gateway event payload before provisioning anything.
+
+#### Step 2 — Core infrastructure (Terraform)
+- [ ] Terraform: Lambda function + IAM execution role (DynamoDB read/write + Bedrock invoke, least-privilege)
+- [ ] Terraform: prod DynamoDB table (same key schema as local, TTL enabled on `ttl` attribute)
+- [ ] Terraform: SSM Parameter Store entries for all secrets (`TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`, etc.)
+- [ ] Lambda packaging: `uv export --no-dev` → pip install → zip
+- [ ] Deploy and smoke-test: invoke Lambda directly with the synthetic payload
+
+#### Step 3 — API Gateway + webhook
+- [ ] Terraform: HTTP API Gateway (POST /webhook → Lambda integration)
+- [ ] Register webhook URL with Telegram (`setWebhook`)
+- [ ] End-to-end test via Telegram
+
+#### Step 4 — Security hardening
+- [ ] Webhook secret token: set `secret_token` at `setWebhook` registration; validate `X-Telegram-Bot-Api-Secret-Token` header in handler before processing
+- [ ] API Gateway resource policy: IP allowlist from Telegram's published CIDR ranges ([cidr.txt](https://core.telegram.org/resources/cidr.txt))
+- [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps IP allowlist in sync with Telegram's published ranges)
+- [ ] IAM role for CIDR updater scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
 - [ ] CloudWatch structured logging validation
-- [ ] Bedrock Guardrails — denied topics policy to block off-topic requests (financial advice, general chat, etc.) and keep the agent scoped to expense tracking
-- [ ] Bedrock Guardrails — prompt attack filter to detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
+
+#### Step 5 — Bedrock Guardrails
+- [ ] Denied topics policy: block off-topic requests (financial advice, general chat) and keep the agent scoped to expense tracking
+- [ ] Prompt attack filter: detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
 
 ---
 
