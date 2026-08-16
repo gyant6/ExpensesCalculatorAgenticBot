@@ -620,7 +620,6 @@ dev = [
 ### Phase 1 — Local Development
 - [x] Project scaffolding: `uv init`, `pyproject.toml`, `.env`, `docker-compose.yml` for DynamoDB Local
 - [x] `config.py` with pydantic-settings
-- [ ] DynamoDB table creation script (run once locally and in prod)
 - [x] Storage layer: `dynamodb.py` — low-level DynamoDB client wrapper
 - [x] Tool implementations (trip, expenses, fx rate)
 - [ ] Unit tests for all tools and storage layer (moto + respx); coverage ≥ 80%
@@ -741,6 +740,7 @@ uv run pre-commit run --all-files
 ---
 
 ### Phase 3 — AWS Deployment
+- [ ] DynamoDB table creation script (run once in prod to create the table with correct key schema, billing mode, and TTL attribute)
 - [ ] Lambda handler (`main.py` webhook mode)
 - [ ] API Gateway setup (POST /webhook)
 - [ ] API Gateway resource policy: IP allowlist from Telegram's CIDR ranges
