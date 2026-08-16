@@ -15,3 +15,15 @@ wheels/
 
 CLAUDE.md
 .env
+
+# Lambda build artefacts
+function.zip
+package/
+requirements.txt
+
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/terraform.tfvars
