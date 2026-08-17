@@ -1,21 +1,27 @@
-"""Pie and bar chart generation and CSV export for trip expense summaries."""
+"""Pie and bar chart rendering for trip expense summaries.
 
-import csv
+This module imports matplotlib, which pulls in numpy, Pillow and fontTools — together
+the largest part of any artefact containing them. It is therefore deployed only in the
+chart Lambda and must not be imported by anything reachable from the main function's
+handler. The CSV export and the SGD conversion both callers need live in `export.py`,
+which has no such dependency.
+"""
+
+from __future__ import annotations
+
 import io
-import logging
 from collections import defaultdict
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
+from src.bot.export import to_sgd
+
 # Headless rendering: no display is available in Lambda or in CI. Set before any figure
 # is created, which only happens inside the functions below.
 matplotlib.use("Agg")
-
-logger = logging.getLogger(__name__)
 
 # Categorical palette — light mode, fixed order (dataviz reference)
 _COLORS = [
@@ -27,16 +33,6 @@ _COLORS = [
     "#008300",  # green
     "#4a3aa7",  # violet
     "#e34948",  # red
-]
-
-CSV_FIELDNAMES = [
-    "date",
-    "summary",
-    "category",
-    "amount",
-    "currency",
-    "amount_sgd",
-    "payment_method",
 ]
 
 _SURFACE = "#fcfcfb"
@@ -66,33 +62,13 @@ def generate_charts(
     date_totals: dict[str, float] = defaultdict(float)
 
     for expense in expenses:
-        sgd = _to_sgd(expense, fx_rates)
+        sgd = to_sgd(expense, fx_rates)
         if sgd is None:
             continue
         category_totals[expense["category"]] += sgd
         date_totals[expense["date"]] += sgd
 
     return _pie_chart(category_totals), _bar_chart(date_totals)
-
-
-def _to_sgd(expense: dict[str, Any], fx_rates: dict[str, float]) -> float | None:
-    """Convert an expense amount to SGD. Returns None if conversion is not possible."""
-    currency = expense.get("currency", "")
-    try:
-        amount = float(Decimal(expense["amount"]))
-    except (InvalidOperation, KeyError):
-        logger.warning("Skipping expense with invalid amount: %s", expense.get("SK"))
-        return None
-
-    if currency == "SGD":
-        return amount
-
-    rate = fx_rates.get(currency)
-    if not rate:
-        logger.warning("No FX rate for %s — expense skipped in chart", currency)
-        return None
-
-    return amount / rate
 
 
 def _pie_chart(category_totals: dict[str, float]) -> bytes:
@@ -183,38 +159,6 @@ def _to_bytes(fig: Figure) -> bytes:
     plt.close(fig)
     buf.seek(0)
     return buf.read()
-
-
-def generate_csv(expenses: list[dict[str, Any]], fx_rates: dict[str, float]) -> bytes:
-    """Generate a UTF-8 CSV of all expenses for the trip.
-
-    Columns: date, summary, category, amount, currency, amount_sgd, payment_method.
-    amount_sgd is the SGD equivalent rounded to 2 decimal places; blank if the
-    currency rate is unavailable.
-
-    Args:
-        expenses: List of expense dicts as returned by query_by_prefix.
-        fx_rates: Exchange rates with SGD as base, used to populate amount_sgd.
-
-    Returns:
-        CSV content as UTF-8 encoded bytes, suitable for sending as a file attachment.
-    """
-    buf = io.StringIO()
-    writer = csv.DictWriter(
-        buf,
-        fieldnames=CSV_FIELDNAMES,
-        extrasaction="ignore",
-    )
-    writer.writeheader()
-    for expense in expenses:
-        sgd = _to_sgd(expense, fx_rates)
-        writer.writerow(
-            {
-                **expense,
-                "amount_sgd": f"{sgd:.2f}" if sgd is not None else "",
-            }
-        )
-    return buf.getvalue().encode("utf-8")
 
 
 def _placeholder(message: str) -> bytes:

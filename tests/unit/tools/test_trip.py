@@ -7,7 +7,7 @@ from unittest.mock import patch
 import respx
 from httpx import Response
 
-from src.bot.charts import CSV_FIELDNAMES
+from src.bot.export import CSV_FIELDNAMES
 from src.bot.storage import dynamodb
 from src.bot.tools import trip
 from src.bot.tools.fx import FX_URL
