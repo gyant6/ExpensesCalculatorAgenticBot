@@ -20,7 +20,7 @@ def _expense(
     category: str = "Food",
     date: str = "2026-01-01",
     **extra: str,
-) -> dict:
+) -> dict[str, str]:
     return {
         "SK": "EXPENSE#2026-01-01",
         "summary": "Test expense",
@@ -37,7 +37,9 @@ def _expense(
 
 
 def test_to_sgd_returns_amount_directly_for_sgd() -> None:
-    assert _to_sgd(_expense(amount="12.50", currency="SGD"), _FX) == pytest.approx(12.50)
+    assert _to_sgd(_expense(amount="12.50", currency="SGD"), _FX) == pytest.approx(
+        12.50
+    )
 
 
 def test_to_sgd_converts_foreign_currency() -> None:
@@ -66,7 +68,7 @@ def test_to_sgd_returns_none_for_empty_fx_rates_on_foreign_currency() -> None:
 # ── generate_csv ─────────────────────────────────────────────────────────────
 
 
-def _parse_csv(data: bytes) -> list[dict]:
+def _parse_csv(data: bytes) -> list[dict[str, str]]:
     return list(csv.DictReader(io.StringIO(data.decode("utf-8"))))
 
 

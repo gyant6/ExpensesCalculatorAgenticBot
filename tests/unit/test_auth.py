@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.bot import telegram_handler
+from src.bot.auth import EntityType
+from src.bot.config import settings
 from src.bot.telegram_handler import _check_auth, handle_auth_callback
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,7 +53,7 @@ def _make_callback_query(data: str) -> AsyncMock:
 async def test_first_contact_creates_pending_and_returns_false(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     context = _make_context()
 
@@ -60,7 +61,7 @@ async def test_first_contact_creates_pending_and_returns_false(
         patch.object(telegram_handler, "get_item", return_value=None) as mock_get,
         patch.object(telegram_handler, "put_item") as mock_put,
     ):
-        result = await _check_auth(update, context, "111", "USER", "@testuser")
+        result = await _check_auth(update, context, "111", EntityType.USER, "@testuser")
 
     assert result is False
     mock_get.assert_called_once_with("AUTH#111", "PROFILE")
@@ -81,7 +82,7 @@ async def test_first_contact_does_not_create_pending_if_no_reply_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_check_auth should not crash when update.message is None."""
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     update.message = None
     context = _make_context()
@@ -90,7 +91,7 @@ async def test_first_contact_does_not_create_pending_if_no_reply_message(
         patch.object(telegram_handler, "get_item", return_value=None),
         patch.object(telegram_handler, "put_item"),
     ):
-        result = await _check_auth(update, context, "111", "USER", "@testuser")
+        result = await _check_auth(update, context, "111", EntityType.USER, "@testuser")
 
     assert result is False
     context.bot.send_message.assert_awaited_once()
@@ -101,7 +102,7 @@ async def test_pending_returns_false_and_replies_without_notifying_admin() -> No
     context = _make_context()
 
     with patch.object(telegram_handler, "get_item", return_value={"status": "PENDING"}):
-        result = await _check_auth(update, context, "111", "USER", "@testuser")
+        result = await _check_auth(update, context, "111", EntityType.USER, "@testuser")
 
     assert result is False
     update.message.reply_text.assert_awaited_once()
@@ -112,8 +113,10 @@ async def test_approved_returns_true_without_any_message() -> None:
     update = _make_update()
     context = _make_context()
 
-    with patch.object(telegram_handler, "get_item", return_value={"status": "APPROVED"}):
-        result = await _check_auth(update, context, "111", "USER", "@testuser")
+    with patch.object(
+        telegram_handler, "get_item", return_value={"status": "APPROVED"}
+    ):
+        result = await _check_auth(update, context, "111", EntityType.USER, "@testuser")
 
     assert result is True
     update.message.reply_text.assert_not_awaited()
@@ -124,8 +127,10 @@ async def test_rejected_returns_false_and_replies_without_notifying_admin() -> N
     update = _make_update()
     context = _make_context()
 
-    with patch.object(telegram_handler, "get_item", return_value={"status": "REJECTED"}):
-        result = await _check_auth(update, context, "111", "USER", "@testuser")
+    with patch.object(
+        telegram_handler, "get_item", return_value={"status": "REJECTED"}
+    ):
+        result = await _check_auth(update, context, "111", EntityType.USER, "@testuser")
 
     assert result is False
     update.message.reply_text.assert_awaited_once()
@@ -135,7 +140,7 @@ async def test_rejected_returns_false_and_replies_without_notifying_admin() -> N
 async def test_group_uses_negative_chat_id_as_auth_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update(
         chat_type="group", chat_id=-100123, chat_title="My Trip Group"
     )
@@ -146,7 +151,7 @@ async def test_group_uses_negative_chat_id_as_auth_key(
         patch.object(telegram_handler, "put_item") as mock_put,
     ):
         result = await _check_auth(
-            update, context, "-100123", "GROUP", "My Trip Group"
+            update, context, "-100123", EntityType.GROUP, "My Trip Group"
         )
 
     assert result is False
@@ -159,7 +164,7 @@ async def test_group_uses_negative_chat_id_as_auth_key(
 async def test_username_falls_back_to_full_name_when_no_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update(username=None, full_name="Jane Doe")
     context = _make_context()
 
@@ -167,7 +172,7 @@ async def test_username_falls_back_to_full_name_when_no_handle(
         patch.object(telegram_handler, "get_item", return_value=None),
         patch.object(telegram_handler, "put_item") as mock_put,
     ):
-        await _check_auth(update, context, "111", "USER", "Jane Doe")
+        await _check_auth(update, context, "111", EntityType.USER, "Jane Doe")
 
     written = mock_put.call_args[0][0]
     assert written["username"] == "Jane Doe"

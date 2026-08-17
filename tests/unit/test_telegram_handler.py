@@ -8,8 +8,8 @@ import pytest
 from botocore.exceptions import ClientError
 
 from src.bot import telegram_handler
+from src.bot.config import settings
 from src.bot.telegram_handler import _extract_text, _parse_mode, handle_admin_command
-
 
 # ── _parse_mode ───────────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ def _make_context(*args: str) -> MagicMock:
 async def test_admin_command_ignored_for_non_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update(user_id=99999)
     await handle_admin_command(update, _make_context("list"))
     update.message.reply_text.assert_not_awaited()
@@ -79,7 +79,7 @@ async def test_admin_command_ignored_for_non_admin(
 async def test_admin_command_no_args_shows_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     await handle_admin_command(update, _make_context())
     update.message.reply_text.assert_awaited_once()
@@ -90,7 +90,7 @@ async def test_admin_command_no_args_shows_usage(
 async def test_admin_command_list_no_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     with patch.object(telegram_handler, "scan_by_pk_prefix", return_value=[]):
         await handle_admin_command(update, _make_context("list"))
@@ -101,11 +101,21 @@ async def test_admin_command_list_no_records(
 async def test_admin_command_list_shows_header_and_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     records = [
-        {"PK": "AUTH#111", "status": "APPROVED", "entity_type": "USER", "username": "@alice"},
-        {"PK": "AUTH#-222", "status": "PENDING", "entity_type": "GROUP", "username": "Trip Group"},
+        {
+            "PK": "AUTH#111",
+            "status": "APPROVED",
+            "entity_type": "USER",
+            "username": "@alice",
+        },
+        {
+            "PK": "AUTH#-222",
+            "status": "PENDING",
+            "entity_type": "GROUP",
+            "username": "Trip Group",
+        },
     ]
     with patch.object(telegram_handler, "scan_by_pk_prefix", return_value=records):
         await handle_admin_command(update, _make_context("list"))
@@ -118,7 +128,7 @@ async def test_admin_command_list_shows_header_and_records(
 async def test_admin_command_approve_missing_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     await handle_admin_command(update, _make_context("approve"))
     text = update.message.reply_text.call_args[0][0]
@@ -128,7 +138,7 @@ async def test_admin_command_approve_missing_id(
 async def test_admin_command_approve_updates_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     with patch.object(telegram_handler, "update_item") as mock_update:
         await handle_admin_command(update, _make_context("approve", "111"))
@@ -139,7 +149,7 @@ async def test_admin_command_approve_updates_status(
 async def test_admin_command_reject_updates_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     with patch.object(telegram_handler, "update_item") as mock_update:
         await handle_admin_command(update, _make_context("reject", "111"))
@@ -149,10 +159,11 @@ async def test_admin_command_reject_updates_status(
 async def test_admin_command_approve_nonexistent_id_replies_not_found(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     error = ClientError(
-        {"Error": {"Code": "ConditionalCheckFailedException", "Message": ""}}, "UpdateItem"
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": ""}},
+        "UpdateItem",
     )
     with patch.object(telegram_handler, "update_item", side_effect=error):
         await handle_admin_command(update, _make_context("approve", "999"))
@@ -163,7 +174,7 @@ async def test_admin_command_approve_nonexistent_id_replies_not_found(
 async def test_admin_command_delete_calls_delete_item(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     with patch.object(telegram_handler, "delete_item") as mock_delete:
         await handle_admin_command(update, _make_context("delete", "111"))
@@ -174,7 +185,7 @@ async def test_admin_command_delete_calls_delete_item(
 async def test_admin_command_unknown_subcommand_shows_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     await handle_admin_command(update, _make_context("banana"))
     text = update.message.reply_text.call_args[0][0]
@@ -184,7 +195,7 @@ async def test_admin_command_unknown_subcommand_shows_usage(
 async def test_admin_command_no_message_returns_early(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     update.message = None
     await handle_admin_command(update, _make_context("list"))
@@ -194,7 +205,7 @@ async def test_admin_command_no_message_returns_early(
 async def test_admin_command_approve_reraises_unexpected_client_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(telegram_handler.settings, "ADMIN_TELEGRAM_ID", 35153600)
+    monkeypatch.setattr(settings, "ADMIN_TELEGRAM_ID", 35153600)
     update = _make_update()
     error = ClientError(
         {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": ""}},
