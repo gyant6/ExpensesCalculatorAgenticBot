@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
@@ -164,7 +164,9 @@ def edit_expense(
     if expense_num < 1:
         return invalid_expense_str
 
-    edited_fields = {"summary": summary}
+    # Values are not all strings: amount is written as a Decimal so DynamoDB stores it
+    # as a Number.
+    edited_fields: dict[str, Any] = {"summary": summary}
 
     if category:
         if category not in CATEGORIES:

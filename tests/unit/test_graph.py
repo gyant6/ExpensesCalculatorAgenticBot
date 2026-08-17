@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from src.bot.agent.graph import custom_routes, end_trip_batch_error_node
+from src.bot.agent.state import AgentState
 from src.bot.tools.trip import end_trip
 
 
-def _state(*messages):  # type: ignore[no-untyped-def]
-    return {"messages": list(messages)}
+def _state(*messages: AnyMessage) -> AgentState:
+    return AgentState(
+        messages=list(messages),
+        telegram_user_id="111",
+        message_date="2026-01-01",
+    )
 
 
 def _ai(tool_names: list[str]) -> AIMessage:

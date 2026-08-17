@@ -23,6 +23,14 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
+from src.bot.auth import (
+    AUTH_PK_PREFIX,
+    AUTH_SK,
+    REVIEW_STATUS,
+    AuthCommand,
+    AuthStatus,
+    EntityType,
+)
 from src.bot.charts import generate_charts, generate_csv
 from src.bot.config import settings
 from src.bot.storage.dynamodb import (
@@ -40,8 +48,18 @@ logger = logging.getLogger(__name__)
 _graph = build_graph()
 _END_TRIP_CONFIRM = "end_trip:confirm"
 _END_TRIP_CANCEL = "end_trip:cancel"
-_AUTH_APPROVE_PREFIX = "auth:approve:"
-_AUTH_REJECT_PREFIX = "auth:reject:"
+# Inline-keyboard callback data for the admin's Approve/Reject buttons, built from the
+# same members as the typed /auth subcommands so the two cannot disagree.
+_AUTH_CALLBACK_NAMESPACE = "auth"
+_AUTH_APPROVE_PREFIX = f"{_AUTH_CALLBACK_NAMESPACE}:{AuthCommand.APPROVE}:"
+_AUTH_REJECT_PREFIX = f"{_AUTH_CALLBACK_NAMESPACE}:{AuthCommand.REJECT}:"
+
+# Built from AuthCommand so a new subcommand cannot be added without appearing in the
+# usage text. LIST is the only member that takes no ID argument.
+_AUTH_USAGE = "Usage:\n" + "\n".join(
+    f"/auth {command}" if command is AuthCommand.LIST else f"/auth {command} <id>"
+    for command in AuthCommand
+)
 
 # Fragment of the Telegram Bot API error returned when an edit would leave the message
 # unchanged. Matched on text because the API exposes no distinct error code for it.
@@ -90,7 +108,7 @@ async def _check_auth(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     auth_id: str,
-    entity_type: str,
+    entity_type: EntityType,
     display_name: str,
 ) -> bool:
     """Check whether a user or group is authorised to use the bot.
@@ -103,7 +121,7 @@ async def _check_auth(
         update: The incoming Update, used to reply to the requester.
         context: The PTB context, used to send the admin notification.
         auth_id: The Telegram user ID (positive) or group chat ID (negative) being checked.
-        entity_type: "USER" or "GROUP".
+        entity_type: Whether auth_id identifies a person or a group chat.
         display_name: Username or group title shown in the admin notification.
 
     Returns:
@@ -113,16 +131,16 @@ async def _check_auth(
         botocore.exceptions.ClientError: If a DynamoDB operation fails.
         telegram.error.TelegramError: If sending the admin notification fails.
     """
-    auth_item = await asyncio.to_thread(get_item, f"AUTH#{auth_id}", "PROFILE")
+    auth_item = await asyncio.to_thread(get_item, f"{AUTH_PK_PREFIX}{auth_id}", AUTH_SK)
 
     if auth_item is None:
         now = datetime.now(timezone.utc).isoformat()
         await asyncio.to_thread(
             put_item,
             {
-                "PK": f"AUTH#{auth_id}",
-                "SK": "PROFILE",
-                "status": "PENDING",
+                "PK": f"{AUTH_PK_PREFIX}{auth_id}",
+                "SK": AUTH_SK,
+                "status": AuthStatus.PENDING,
                 "entity_type": entity_type,
                 "username": display_name,
                 "requested_at": now,
@@ -153,10 +171,12 @@ async def _check_auth(
             )
         return False
 
-    if auth_item.get("status") == "APPROVED":
+    if auth_item.get("status") == AuthStatus.APPROVED:
         return True
     if update.message:
-        await update.message.reply_text("You don't have access yet. A request has been sent for approval.")
+        await update.message.reply_text(
+            "You don't have access yet. A request has been sent for approval."
+        )
     return False
 
 
@@ -183,14 +203,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if chat and chat.type in ("group", "supergroup"):
         auth_id = str(chat.id)
-        entity_type = "GROUP"
+        entity_type = EntityType.GROUP
         display_name = chat.title or auth_id
     else:
         auth_id = user_id
-        entity_type = "USER"
+        entity_type = EntityType.USER
         raw_username = update.effective_user.username
         display_name = (
-            f"@{raw_username}" if raw_username else (update.effective_user.full_name or user_id)
+            f"@{raw_username}"
+            if raw_username
+            else (update.effective_user.full_name or user_id)
         )
 
     if not await _check_auth(update, context, auth_id, entity_type, display_name):
@@ -430,7 +452,9 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text(content, parse_mode=_parse_mode(content))
 
 
-async def handle_auth_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_auth_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Process the admin's Approve/Reject decision for an access request.
 
     Triggered when the admin taps the inline keyboard sent when an unknown entity first
@@ -455,54 +479,47 @@ async def handle_auth_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     data = query.data or ""
     if data.startswith(_AUTH_APPROVE_PREFIX):
-        action = "approve"
-        auth_id = data[len(_AUTH_APPROVE_PREFIX):]
+        action = AuthCommand.APPROVE
+        auth_id = data[len(_AUTH_APPROVE_PREFIX) :]
     elif data.startswith(_AUTH_REJECT_PREFIX):
-        action = "reject"
-        auth_id = data[len(_AUTH_REJECT_PREFIX):]
+        action = AuthCommand.REJECT
+        auth_id = data[len(_AUTH_REJECT_PREFIX) :]
     else:
         return
 
-    auth_item = await asyncio.to_thread(get_item, f"AUTH#{auth_id}", "PROFILE")
+    auth_item = await asyncio.to_thread(get_item, f"{AUTH_PK_PREFIX}{auth_id}", AUTH_SK)
     if not auth_item:
-        await query.edit_message_text("Auth record not found — it may have been removed.")
+        await query.edit_message_text(
+            "Auth record not found — it may have been removed."
+        )
         return
 
-    entity_type = auth_item.get("entity_type", "USER")
+    entity_type = auth_item.get("entity_type", EntityType.USER)
     display_name = auth_item.get("username", auth_id)
     now = datetime.now(timezone.utc).isoformat()
+    new_status = REVIEW_STATUS[action]
 
-    if action == "approve":
-        await asyncio.to_thread(
-            update_item,
-            f"AUTH#{auth_id}",
-            "PROFILE",
-            {"status": "APPROVED", "reviewed_at": now},
-        )
-        await context.bot.send_message(
-            chat_id=int(auth_id),
-            text="Your access has been approved! Start a new trip to start tracking your expenses!",
-        )
-        await query.edit_message_text(
-            f"Approved: {display_name} ({entity_type} ID: {auth_id})"
-        )
+    await asyncio.to_thread(
+        update_item,
+        f"{AUTH_PK_PREFIX}{auth_id}",
+        AUTH_SK,
+        {"status": new_status, "reviewed_at": now},
+    )
+
+    if new_status is AuthStatus.APPROVED:
+        requester_text = "Your access has been approved! Start a new trip to start tracking your expenses!"
+        admin_text = f"Approved: {display_name} ({entity_type} ID: {auth_id})"
     else:
-        await asyncio.to_thread(
-            update_item,
-            f"AUTH#{auth_id}",
-            "PROFILE",
-            {"status": "REJECTED", "reviewed_at": now},
-        )
-        await context.bot.send_message(
-            chat_id=int(auth_id),
-            text="Your access request has been rejected.",
-        )
-        await query.edit_message_text(
-            f"Rejected: {display_name} ({entity_type} ID: {auth_id})"
-        )
+        requester_text = "Your access request has been rejected."
+        admin_text = f"Rejected: {display_name} ({entity_type} ID: {auth_id})"
+
+    await context.bot.send_message(chat_id=int(auth_id), text=requester_text)
+    await query.edit_message_text(admin_text)
 
 
-async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_admin_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle /auth admin commands sent directly to the bot.
 
     PTB routes CommandHandlers separately from MessageHandlers, so this function is never
@@ -524,67 +541,60 @@ async def handle_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
             ConditionalCheckFailedException on approve/reject, which is handled inline).
         telegram.error.TelegramError: If a Telegram API call fails.
     """
-    if not update.effective_user or update.effective_user.id != settings.ADMIN_TELEGRAM_ID:
+    if (
+        not update.effective_user
+        or update.effective_user.id != settings.ADMIN_TELEGRAM_ID
+    ):
         return
     if not update.message:
         return
 
     args = context.args or []
     if not args:
-        await update.message.reply_text(
-            "Usage:\n"
-            "/auth list\n"
-            "/auth approve <id>\n"
-            "/auth reject <id>\n"
-            "/auth delete <id>"
-        )
+        await update.message.reply_text(_AUTH_USAGE)
         return
 
-    subcommand = args[0]
+    try:
+        subcommand = AuthCommand(args[0])
+    except ValueError:
+        await update.message.reply_text(f"Unknown subcommand. {_AUTH_USAGE}")
+        return
 
-    if subcommand == "list":
-        records = await asyncio.to_thread(scan_by_pk_prefix, "AUTH#")
+    if subcommand is AuthCommand.LIST:
+        records = await asyncio.to_thread(scan_by_pk_prefix, AUTH_PK_PREFIX)
         if not records:
             await update.message.reply_text("No auth records found.")
             return
         lines = ["Status | Type | Name (ID)"]
         for r in sorted(records, key=lambda x: x.get("username", "")):
-            auth_id = r["PK"].removeprefix("AUTH#")
+            auth_id = r["PK"].removeprefix(AUTH_PK_PREFIX)
             lines.append(
                 f"{r.get('status', '?')} | {r.get('entity_type', '?')} | "
                 f"{r.get('username', '?')} ({auth_id})"
             )
         await update.message.reply_text("\n".join(lines))
+        return
 
-    elif subcommand in ("approve", "reject", "delete"):
-        if len(args) < 2:
-            await update.message.reply_text(f"Usage: /auth {subcommand} <id>")
-            return
-        auth_id = args[1]
-        pk = f"AUTH#{auth_id}"
+    if len(args) < 2:
+        await update.message.reply_text(f"Usage: /auth {subcommand} <id>")
+        return
+    auth_id = args[1]
+    pk = f"{AUTH_PK_PREFIX}{auth_id}"
 
-        if subcommand == "delete":
-            await asyncio.to_thread(delete_item, pk, "PROFILE")
-            await update.message.reply_text(f"Deleted auth record for ID {auth_id}.")
-        else:
-            new_status = "APPROVED" if subcommand == "approve" else "REJECTED"
-            now = datetime.now(timezone.utc).isoformat()
-            try:
-                await asyncio.to_thread(
-                    update_item, pk, "PROFILE", {"status": new_status, "reviewed_at": now}
-                )
-            except ClientError as exc:
-                if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                    await update.message.reply_text(f"No auth record found for ID {auth_id}.")
-                    return
-                raise
-            await update.message.reply_text(f"Set {auth_id} to {new_status}.")
+    if subcommand is AuthCommand.DELETE:
+        await asyncio.to_thread(delete_item, pk, AUTH_SK)
+        await update.message.reply_text(f"Deleted auth record for ID {auth_id}.")
+        return
 
-    else:
-        await update.message.reply_text(
-            "Unknown subcommand. Usage:\n"
-            "/auth list\n"
-            "/auth approve <id>\n"
-            "/auth reject <id>\n"
-            "/auth delete <id>"
+    new_status = REVIEW_STATUS[subcommand]
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        await asyncio.to_thread(
+            update_item, pk, AUTH_SK, {"status": new_status, "reviewed_at": now}
         )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            await update.message.reply_text(f"No auth record found for ID {auth_id}.")
+            return
+        raise
+    await update.message.reply_text(f"Set {auth_id} to {new_status}.")
