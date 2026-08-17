@@ -54,8 +54,10 @@ ExpensesCalculatorAgenticBot/
 │       │   └── dynamodb.py       # DynamoDB client + table operations
 │       ├── charts.py             # pie and bar chart rendering (matplotlib; chart Lambda only)
 │       ├── chart_handler.py      # chart Lambda entrypoint: payload in, base64 PNGs out
-│       ├── charts_client.py      # invokes the chart Lambda from the main function
+│       ├── charts_client.py      # invokes the chart Lambda; renders in-process locally
+│       ├── chart_protocol.py     # payload keys shared by both functions; no dependencies
 │       ├── export.py             # CSV generation and SGD conversion (no matplotlib)
+│       ├── auth.py               # AuthStatus, EntityType, AuthCommand, AUTH# key constants
 │       ├── telegram_handler.py   # receives Telegram updates, calls agent
 │       └── config.py             # settings via pydantic-settings
 └── tests/
@@ -64,6 +66,14 @@ ExpensesCalculatorAgenticBot/
     ├── unit/
     │   ├── __init__.py
     │   ├── test_config.py
+    │   ├── test_export.py
+    │   ├── test_charts.py
+    │   ├── test_chart_handler.py
+    │   ├── test_charts_client.py
+    │   ├── test_auth.py
+    │   ├── test_graph.py
+    │   ├── test_prompts.py
+    │   ├── test_telegram_handler.py
     │   ├── tools/
     │   │   ├── __init__.py
     │   │   ├── test_trip.py
@@ -384,7 +394,7 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 - **Input:** _(none)_
 - **Action:** `GET https://api.fxratesapi.com/latest?base=SGD`. Fetches all rates with SGD as the base.
 - **Returns:** `dict` mapping currency codes to their rate relative to SGD (e.g. `{"JPY": 167.5, "USD": 0.74}`). To convert a foreign amount to SGD: `sgd_amount = foreign_amount / rates[currency]`.
-- **Note:** Synchronous, because its caller `end_trip` is a sync tool executing inside `graph.invoke` and cannot await. Called twice per trip end — once inside `end_trip` for the CSV, once in `_render_attachments` for the charts. Not bound to the LLM.
+- **Note:** Synchronous, because its caller `end_trip` is a sync tool executing inside `graph.invoke` and cannot await. Called twice per trip end — once inside `end_trip` for the CSV, once in `_render_attachments` for the charts. The rates fetched by the handler are passed to the chart function in the invoke payload, so the charts and the CSV are never drawn from separately fetched rates. Not bound to the LLM.
 
 ---
 
@@ -432,9 +442,11 @@ Transport: SGD 15.44
 Leisure: SGD 11.28
 ```
 
-**Message 2 — Photo:** Pie chart of spending by category (PNG, generated in memory via `matplotlib`).
+**Message 2 — Photo:** Pie chart of spending by category (PNG, rendered in memory by the chart Lambda; in-process locally).
 
-**Message 3 — Photo:** Bar chart of daily spending in SGD (PNG, generated in memory via `matplotlib`).
+**Message 3 — Photo:** Bar chart of daily spending in SGD (PNG, same path as above).
+
+Both photos are omitted if rendering fails, or if FX rates were unavailable — the charts plot SGD only. The text summary and the CSV are always sent.
 
 **Message 4 — File:** `expenses.csv` with columns: `date, summary, category, amount, currency, amount_sgd, payment_method`.
 
@@ -462,6 +474,11 @@ DYNAMODB_ENDPOINT_URL=http://localhost:8000   # remove this line in prod
 LOG_LEVEL=INFO
 ENVIRONMENT=local   # or: production
 ADMIN_TELEGRAM_ID=   # Telegram user ID that receives access-request notifications
+
+# Charts — production only. Locally the charts are rendered in-process, so both are
+# unused and CHART_LAMBDA_FUNCTION_NAME may be omitted entirely.
+CHART_LAMBDA_FUNCTION_NAME=   # name of the deployed chart Lambda
+CHART_LAMBDA_TIMEOUT_SECONDS=30
 
 # LangSmith (evals only — not required for the bot to run)
 LANGSMITH_API_KEY=your_langsmith_api_key_here
@@ -502,6 +519,8 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `update_item`, `transact_write_delete_put` and `query_by_prefix` against moto; `query_by_prefix` returns every item across DynamoDB's 1 MB page boundary |
 | `test_export.py` | `to_sgd` converts foreign currency, passes SGD through, and returns None for an unparseable amount or a missing rate; `generate_csv` emits the expected columns, populates `amount_sgd`, blanks it when no rate exists, and preserves the original amount and currency |
 | `test_charts.py` | `generate_charts` returns PNG bytes for a populated trip, for an empty one, and when no expense has a usable rate |
+| `test_chart_handler.py` | The chart Lambda returns both images base64-encoded, renders placeholders for a trip with no expenses, and rejects an event missing a required key or carrying a non-list `expenses` |
+| `test_charts_client.py` | Decimal amounts serialise to strings and the payload survives `json.dumps`; the local path renders in-process and never invokes; the production path invokes with the expected payload and decodes both images; `None` is returned when the invoke is rejected, times out, reports a function error, returns an incomplete payload, or the function name is unset |
 | `test_auth.py` | `_check_auth`: first contact creates PENDING and notifies admin; PENDING/REJECTED/APPROVED return correct bool and send correct replies; group uses negative chat ID; missing username falls back to full name. `handle_auth_callback`: approve/reject update DynamoDB status and notify requester; missing auth record edits message without sending notification; group approval notifies the group chat |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
@@ -614,6 +633,11 @@ pytest tests/unit/ --cov --cov-report=term-missing --cov-report=html
 
 ```toml
 [dependency-groups]
+# Deployed only in the chart Lambda, and selected on its own by
+# `uv export --only-group charts`.
+charts = [
+    "matplotlib>=3.11.1",
+]
 dev = [
     "boto3-stubs[dynamodb]>=1.43.27",
     "moto[dynamodb]>=5.2.1",
@@ -626,6 +650,12 @@ dev = [
     "respx>=0.23.1",
     "ruff>=0.15.17",
 ]
+
+[tool.uv]
+# `charts` is a deployment boundary, not an optional feature: local polling and the test
+# suite both render in-process, so a plain `uv sync` must still install matplotlib. Only
+# the main function's production artefact goes without it.
+default-groups = ["dev", "charts"]
 ```
 
 ---
@@ -680,20 +710,33 @@ Tackled in order so the bot is running in prod as early as possible, with securi
 
 #### Step 3 — Split chart rendering into its own Lambda
 
-The first build measured **67.8 MB zipped, 197.5 MB unzipped** — past Lambda's 50 MB direct-upload limit. matplotlib, numpy, Pillow, fontTools and kiwisolver account for 37.5 MB zipped (121.4 MB unzipped) of that, and exist solely for the two PNGs sent at trip end. Moving them into a second function puts both artefacts under the limit — roughly 30 MB for the main function and 38 MB for the chart function — so neither needs S3 staging.
+The first build measured **67.8 MB zipped, 197.5 MB unzipped** — past Lambda's 50 MB direct-upload limit. matplotlib, Pillow, fontTools and kiwisolver account for much of that and exist solely for the two PNGs sent at trip end. Splitting them into a second function puts both artefacts under the limit, so neither needs S3 staging.
+
+Measured after the split:
+
+| Archive | Zipped | % of the 50 MB cap | Largest components |
+|---|---:|---:|---|
+| `function.zip` | 44.9 MB | 88% | botocore 14.0, numpy 15.7, zstandard 5.3 |
+| `chart_function.zip` | 39.2 MB | 78% | matplotlib 9.3, numpy 15.7, Pillow 6.5, fontTools 4.6 |
+
+Two things this measurement corrected. **numpy stays in the main function regardless** — `langchain-aws` depends on it directly, so it is not part of what leaves with matplotlib. And the main archive sits at 88% of the cap, not the roughly 30 MB estimated before building, leaving about 5 MB of headroom. If that runs out, the lever is botocore: at 14.0 MB it is the single largest item, and the Lambda runtime already provides boto3 and botocore, so excluding them would bring the archive to about 31 MB at the cost of pinning to whatever version AWS ships.
+
+The cold-start benefit is unaffected by numpy remaining, because bytes in the artefact are not the same as modules imported. Verified directly: importing `src.bot.main` pulls in none of matplotlib, numpy, Pillow, fontTools or kiwisolver.
 
 Size is what forces the decision, but cold start is the better reason for it. `charts.py` imports matplotlib at module scope and `tools/trip.py` imports `generate_csv` from that same module, so matplotlib and numpy load on **every** cold start of the main function, including one that only records an expense. After the split the main function has no import path to matplotlib at all, and only trip end pays that cost. For a personal bot that idles long enough for containers to be reaped, most messages are cold starts, so this trades a cost on the frequent path for one on the rare path.
 
-- [ ] Extract the matplotlib-free code out of `charts.py` into `src/bot/export.py`: `CSV_FIELDNAMES`, `generate_csv` and `_to_sgd`. `charts.py` keeps only the plotting functions and imports `_to_sgd` from the new module. Update the imports in `tools/trip.py` and `telegram_handler.py`. The condition to verify is direct: no module reachable from `main.lambda_handler` may import matplotlib
-- [ ] Move matplotlib into its own PEP 735 dependency group: `[dependency-groups] charts = [...]`, with `[tool.uv] default-groups` extended so it stays installed locally for `dev_runner` and the tests. A group rather than an optional-dependency extra because `uv export` offers `--only-group` but has no `--only-extra`, and the chart artefact must contain matplotlib and nothing else
-- [ ] `scripts/build_lambda.py`: emit two archives — `function.zip` from `uv export --no-dev --no-default-groups`, `chart_function.zip` from `uv export --only-group charts` — and report both against the 50 MB limit
-- [ ] New handler `src/bot/chart_handler.py`: `lambda_handler(event, context)` taking `{"expenses": [...], "fx_rates": {...}}` and returning base64-encoded PNGs. Expense amounts arrive from DynamoDB as `Decimal`, which `json.dumps` refuses, so the caller serialises them explicitly rather than relying on a default encoder
-- [ ] New client `src/bot/charts_client.py`: `render_charts(expenses, fx_rates)` invokes the chart function synchronously via boto3 with an explicit timeout and returns `None` on any failure. A chart failure must not cost the user their summary or CSV — the same graceful degradation already applied when FX rates are unavailable
-- [ ] `config.py`: `CHART_LAMBDA_FUNCTION_NAME`. Local polling and `dev_runner` render in-process rather than invoking, since matplotlib is installed locally; the branch is on `ENVIRONMENT`, matching the existing SSM branch
+- [x] Extract the matplotlib-free code out of `charts.py` into `src/bot/export.py`: `CSV_FIELDNAMES`, `generate_csv` and `to_sgd` (made public, since it is now shared across modules). `charts.py` keeps only the plotting functions. Imports updated in `tools/trip.py` and `telegram_handler.py`
+- [x] Move matplotlib into its own PEP 735 dependency group: `[dependency-groups] charts = [...]`, with `[tool.uv] default-groups = ["dev", "charts"]` so it stays installed locally for polling and the tests. A group rather than an optional-dependency extra because `uv export` offers `--only-group` but has no `--only-extra`, and the chart artefact must contain matplotlib and nothing else
+- [x] `scripts/build_lambda.py`: emit two archives — `function.zip` from `uv export --no-dev --no-default-groups`, `chart_function.zip` from `uv export --only-group charts` — and report both against the 50 MB limit. Both are built even if the first is oversized, so one run reports every size
+- [x] New handler `src/bot/chart_handler.py`: `lambda_handler(event, context)` taking `{"expenses": [...], "fx_rates": {...}}` and returning base64-encoded PNGs. Reads `LOG_LEVEL` straight from the environment rather than through `config.py`, which would require the bot token and admin ID this function has no business holding
+- [x] New client `src/bot/charts_client.py`: `render_charts(expenses, fx_rates)` invokes the chart function synchronously via boto3 with explicit connect and read timeouts, and returns `None` on any failure. A chart failure must not cost the user their summary or CSV — the same graceful degradation already applied when FX rates are unavailable. Decimal amounts are serialised to strings, not floats, because `to_sgd` parses them back through `Decimal` and a float round-trip would reintroduce the representation error the Number migration removed
+- [x] `src/bot/chart_protocol.py`: the four payload keys, with no imports of its own, so both sides agree on the contract without the chart function acquiring the bot's configuration or dependencies
+- [x] `config.py`: `CHART_LAMBDA_FUNCTION_NAME` and `CHART_LAMBDA_TIMEOUT_SECONDS`, plus a `PRODUCTION_ENVIRONMENT` constant replacing the `"production"` literal. Local polling renders in-process rather than invoking, via an import inside the function — `charts.py` ships in both artefacts but matplotlib does not, so a module-level import would work locally and fail at cold start in production
 - [ ] Terraform: second `aws_lambda_function` for charts with its own execution role. It touches no DynamoDB, Bedrock or SSM, so that role carries CloudWatch Logs only. Grant the main role `lambda:InvokeFunction` scoped to the chart function ARN
 - [ ] Terraform: `lifecycle { ignore_changes = [filename, source_code_hash] }` on both functions, so code deployed by the AWS CLI is not rolled back by a later `terraform apply`. Terraform owns the infrastructure; the CLI owns the code. Same reasoning as the `ignore_changes` already on the SSM placeholder values
-- [ ] Unit tests: the chart handler returns PNGs for a representative payload; `render_charts` returns `None` and logs when the invoke fails or comes back with a function error
-- [ ] Rebuild and confirm both archives are under 50 MB zipped and their combined unzipped size is under 250 MB
+- [x] Unit tests: the chart handler returns PNGs for a representative payload and rejects a malformed event; `render_charts` returns `None` and logs when the invoke is rejected, times out, reports a function error, or returns a payload missing an image
+- [x] Rebuild and confirm both archives are under 50 MB zipped and each unzipped size is under 250 MB
+- [ ] `boto3-stubs[dynamodb]` → `boto3-stubs[dynamodb,lambda]` in the dev group. Without the Lambda stubs, `mypy_boto3_lambda` does not resolve and `ignore_missing_imports` silently degrades the `LambdaClient` annotation in `charts_client` to `Any`, so mypy is not checking the `invoke` call at all
 
 Constraints worth recording:
 - A synchronous invoke caps request and response at 6 MB each. This is a limit on the data passed between the two functions and is unrelated to the 50 MB deployment limit above. PNGs must be base64-encoded to travel in a JSON response, which inflates them by about a third, so the usable image budget is nearer 4.5 MB. Two charts and a small expense list sit far below that. If they ever approached it, the chart function would write the PNG to a bucket and return the object key instead of the bytes
