@@ -475,13 +475,15 @@ dependencies = [
     { name = "langchain-core" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-aws" },
-    { name = "matplotlib" },
     { name = "pydantic-settings" },
     { name = "python-telegram-bot", extra = ["webhooks"] },
     { name = "tzdata" },
 ]
 
 [package.dev-dependencies]
+charts = [
+    { name = "matplotlib" },
+]
 dev = [
     { name = "boto3-stubs", extra = ["dynamodb"] },
     { name = "moto", extra = ["dynamodb"] },
@@ -503,13 +505,13 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.4.0" },
     { name = "langgraph", specifier = ">=1.2.4" },
     { name = "langgraph-checkpoint-aws", specifier = ">=1.1.1" },
-    { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "python-telegram-bot", extras = ["webhooks"], specifier = ">=21.0" },
     { name = "tzdata", specifier = ">=2026.2" },
 ]
 
 [package.metadata.requires-dev]
+charts = [{ name = "matplotlib", specifier = ">=3.11.1" }]
 dev = [
     { name = "boto3-stubs", extras = ["dynamodb"], specifier = ">=1.43.27" },
     { name = "moto", extras = ["dynamodb"], specifier = ">=5.2.1" },

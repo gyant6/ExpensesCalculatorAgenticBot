@@ -11,13 +11,20 @@ dependencies = [
     "langchain-core>=1.4.0",
     "langgraph>=1.2.4",
     "langgraph-checkpoint-aws>=1.1.1",
-    "matplotlib>=3.11.1",
     "pydantic-settings>=2.14.1",
     "python-telegram-bot[webhooks]>=21.0",
     "tzdata>=2026.2",
 ]
 
 [dependency-groups]
+# Deployed only in the chart Lambda. matplotlib pulls numpy, Pillow and fontTools with
+# it — together larger than every other dependency combined — and the main function must
+# not carry them, so they are isolated in a group `uv export --only-group charts` can
+# select on its own. A group rather than an optional-dependency extra because uv export
+# offers --only-group but has no --only-extra.
+charts = [
+    "matplotlib>=3.11.1",
+]
 dev = [
     "boto3-stubs[dynamodb]>=1.43.27",
     "moto[dynamodb]>=5.2.1",
@@ -30,6 +37,12 @@ dev = [
     "respx>=0.23.1",
     "ruff>=0.15.17",
 ]
+
+[tool.uv]
+# `charts` is a deployment boundary, not an optional feature. Local polling and the test
+# suite both render charts in-process, so matplotlib must stay installed by a plain
+# `uv sync` — only the production artefact for the main function goes without it.
+default-groups = ["dev", "charts"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
