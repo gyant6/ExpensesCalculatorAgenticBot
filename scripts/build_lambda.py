@@ -1,18 +1,26 @@
-"""Build `function.zip`, the deployment artefact for the Lambda webhook handler.
+"""Build the two Lambda deployment artefacts.
 
 Run from anywhere: `uv run python scripts/build_lambda.py`
 
+    function.zip        the bot: Telegram handler, agent graph, tools, storage
+    chart_function.zip  the chart renderer: matplotlib and nothing else
+
 Lambda has no package manager at runtime. It unpacks the zip to `/var/task` and puts
 that directory on `sys.path`, so every third-party dependency has to be present in the
-archive as files. This script assembles that archive:
+archive as files. Each archive is assembled the same way:
 
-    uv export      pinned production dependencies, straight from uv.lock
+    uv export      pinned dependencies for that function, straight from uv.lock
     uv pip install those dependencies into package/, built for the Lambda runtime
     zip            package/ at the archive root, then src/ alongside it
 
 The layout is what makes imports resolve once deployed: dependencies at the root so
-`import telegram` finds `/var/task/telegram/`, and the application under `src/` so the
-configured handler `src.bot.main.lambda_handler` resolves.
+`import telegram` finds `/var/task/telegram/`, and the application under `src/` so a
+handler like `src.bot.main.lambda_handler` resolves.
+
+Both archives carry the whole of `src/`, which is a few dozen KB and not worth splitting.
+What separates them is the dependency set: `charts.py` ships in both, but only the chart
+archive contains the matplotlib it imports. That is why `charts_client` imports it lazily
+on the local path — a module-level import would fail at cold start in production.
 
 Dependencies are resolved for the Lambda runtime rather than the machine running this
 script, so a build on Windows or macOS produces the same Linux artefact as a build on
@@ -21,8 +29,8 @@ the CI runner. Wheels for the target platform cannot be compiled locally, so
 instead of at cold start in production.
 
 Exit codes:
-    0: the archive was written and is within Lambda's direct-upload limit.
-    1: the archive was written but exceeds a Lambda size limit, or a build step failed.
+    0: both archives were written and are within Lambda's direct-upload limit.
+    1: an archive exceeds a Lambda size limit, or a build step failed.
 """
 
 from __future__ import annotations
@@ -31,13 +39,46 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_DIR = ROOT / "package"
-ZIP_FILE = ROOT / "function.zip"
 REQUIREMENTS_FILE = ROOT / "requirements.txt"
 SOURCE_DIR = ROOT / "src"
+
+
+@dataclass(frozen=True)
+class Artefact:
+    """One deployable archive and the uv export flags that select its dependencies.
+
+    Attributes:
+        name: Human-readable name used in progress output.
+        zip_file: Where the archive is written.
+        export_flags: Flags appended to `uv export` to select this function's
+            dependency set from the shared lockfile.
+    """
+
+    name: str
+    zip_file: Path
+    export_flags: tuple[str, ...]
+
+
+# --no-default-groups drops the charts group, so the bot's archive has no matplotlib.
+# --only-group charts does the inverse: matplotlib and its transitive dependencies with
+# none of langchain, langgraph or python-telegram-bot.
+ARTEFACTS = (
+    Artefact(
+        name="bot",
+        zip_file=ROOT / "function.zip",
+        export_flags=("--no-dev", "--no-default-groups"),
+    ),
+    Artefact(
+        name="charts",
+        zip_file=ROOT / "chart_function.zip",
+        export_flags=("--only-group", "charts"),
+    ),
+)
 
 # Must match `runtime` and `architectures` on the aws_lambda_function resource in
 # terraform/main.tf. A mismatch surfaces as an ImportError at cold start, because the
@@ -134,28 +175,32 @@ def _format_size(num_bytes: int) -> str:
     return f"{num_bytes / 1024 / 1024:.1f} MB"
 
 
-def main() -> int:
-    """Build the deployment archive and report its size against Lambda's limits.
+def _build(artefact: Artefact) -> int:
+    """Build one archive and report its size against Lambda's limits.
+
+    Args:
+        artefact: Which archive to build and how to select its dependencies.
 
     Returns:
-        0 if the archive fits within Lambda's direct-upload limit, 1 if it exceeds
-        either the direct-upload or the unzipped limit.
+        0 if the archive fits within Lambda's limits, 1 if it exceeds either.
 
     Raises:
         subprocess.CalledProcessError: If dependency export or installation fails.
         FileNotFoundError: If `uv` is not on PATH.
     """
-    print("Cleaning previous build...")
+    # ASCII only: the Windows console encodes stdout as cp1252, which cannot represent
+    # arrows or box characters.
+    print(f"\n=== {artefact.name} -> {artefact.zip_file.name} ===")
     shutil.rmtree(PACKAGE_DIR, ignore_errors=True)
-    ZIP_FILE.unlink(missing_ok=True)
+    artefact.zip_file.unlink(missing_ok=True)
     REQUIREMENTS_FILE.unlink(missing_ok=True)
 
     try:
-        print("Exporting production dependencies from uv.lock...")
+        print("Exporting dependencies from uv.lock...")
         _run(
             "uv",
             "export",
-            "--no-dev",
+            *artefact.export_flags,
             "--no-hashes",
             "--no-emit-project",
             "-o",
@@ -180,17 +225,16 @@ def main() -> int:
         )
 
         print("Writing archive...")
-        with zipfile.ZipFile(ZIP_FILE, "w", zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(artefact.zip_file, "w", zipfile.ZIP_DEFLATED) as archive:
             dependency_bytes = _add_tree(archive, PACKAGE_DIR)
             source_bytes = _add_tree(archive, SOURCE_DIR, arc_root=SOURCE_DIR.name)
     finally:
         shutil.rmtree(PACKAGE_DIR, ignore_errors=True)
         REQUIREMENTS_FILE.unlink(missing_ok=True)
 
-    zipped_bytes = ZIP_FILE.stat().st_size
+    zipped_bytes = artefact.zip_file.stat().st_size
     unzipped_bytes = dependency_bytes + source_bytes
 
-    print(f"\nWrote {ZIP_FILE.name}")
     print(f"  dependencies : {_format_size(dependency_bytes)} unzipped")
     print(f"  application  : {_format_size(source_bytes)} unzipped")
     print(f"  archive      : {_format_size(zipped_bytes)} zipped")
@@ -198,19 +242,35 @@ def main() -> int:
     exit_code = 0
     if zipped_bytes > DIRECT_UPLOAD_LIMIT_BYTES:
         print(
-            f"\nERROR: {_format_size(zipped_bytes)} exceeds Lambda's "
+            f"  ERROR: {_format_size(zipped_bytes)} exceeds Lambda's "
             f"{_format_size(DIRECT_UPLOAD_LIMIT_BYTES)} direct-upload limit. "
-            "Stage the archive in S3 and deploy it with --s3-bucket/--s3-key."
+            "Stage this archive in S3 and deploy it with --s3-bucket/--s3-key."
         )
         exit_code = 1
     if unzipped_bytes > UNZIPPED_LIMIT_BYTES:
         print(
-            f"\nERROR: {_format_size(unzipped_bytes)} unzipped exceeds Lambda's "
+            f"  ERROR: {_format_size(unzipped_bytes)} unzipped exceeds Lambda's "
             f"{_format_size(UNZIPPED_LIMIT_BYTES)} limit. Drop dependencies or move "
             "them into a layer."
         )
         exit_code = 1
     return exit_code
+
+
+def main() -> int:
+    """Build every deployment archive.
+
+    Returns:
+        0 if all archives are within Lambda's limits, 1 if any exceeded them.
+
+    Raises:
+        subprocess.CalledProcessError: If dependency export or installation fails.
+        FileNotFoundError: If `uv` is not on PATH.
+    """
+    # Built unconditionally rather than stopping at the first oversized archive, so one
+    # run reports the size of everything.
+    results = [_build(artefact) for artefact in ARTEFACTS]
+    return max(results)
 
 
 if __name__ == "__main__":
