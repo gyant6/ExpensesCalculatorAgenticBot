@@ -3,7 +3,6 @@
 import asyncio
 import io
 import logging
-import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -31,7 +30,7 @@ from src.bot.auth import (
     AuthStatus,
     EntityType,
 )
-from src.bot.charts import generate_charts
+from src.bot.charts_client import render_charts
 from src.bot.config import settings
 from src.bot.export import generate_csv
 from src.bot.storage.dynamodb import (
@@ -67,10 +66,6 @@ _AUTH_USAGE = "Usage:\n" + "\n".join(
 _MESSAGE_NOT_MODIFIED = "not modified"
 
 _CSV_FILENAME = "expenses.csv"
-
-# matplotlib's pyplot keeps global figure state, so two trips ending at once must not
-# render charts concurrently.
-_CHART_LOCK = threading.Lock()
 
 
 def _config(telegram_user_id: str) -> RunnableConfig:
@@ -331,11 +326,13 @@ def _render_attachments(
     pie_bytes: bytes | None = None
     bar_bytes: bytes | None = None
     if fx_rates:
-        try:
-            with _CHART_LOCK:
-                pie_bytes, bar_bytes = generate_charts(expenses, fx_rates)
-        except Exception:
-            logger.exception("Chart generation failed for user %s", telegram_user_id)
+        # render_charts logs and returns None on failure rather than raising: charts are
+        # a convenience, and the trip summary must go out regardless.
+        charts = render_charts(expenses, fx_rates)
+        if charts is None:
+            logger.warning("Charts unavailable for user %s", telegram_user_id)
+        else:
+            pie_bytes, bar_bytes = charts
 
     return pie_bytes, bar_bytes, csv_bytes
 

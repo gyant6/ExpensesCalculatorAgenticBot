@@ -10,9 +10,14 @@ Production (Lambda): non-sensitive values come from Lambda environment variables
 
 import logging
 import os
+from typing import Final
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Value of ENVIRONMENT that selects production behaviour: secrets are read from SSM, and
+# charts are rendered by invoking the chart Lambda rather than in-process.
+PRODUCTION_ENVIRONMENT: Final = "production"
 
 # SSM fields: env var that holds the path → env var that receives the value.
 _SSM_FIELDS: dict[str, str] = {
@@ -36,7 +41,7 @@ def _load_ssm_secrets() -> None:
         botocore.exceptions.ClientError: If the SSM API call fails (IAM
             permission denied, network error, etc.).
     """
-    if os.environ.get("ENVIRONMENT") != "production":
+    if os.environ.get("ENVIRONMENT") != PRODUCTION_ENVIRONMENT:
         return
 
     import boto3
@@ -81,6 +86,15 @@ class Settings(BaseSettings):
     DYNAMODB_TABLE_NAME: str
     DYNAMODB_ENDPOINT_URL: str | None = None
     ADMIN_TELEGRAM_ID: int
+    # Name of the Lambda that renders the trip charts. Required when
+    # ENVIRONMENT=production; unused locally, where charts are rendered in-process
+    # because matplotlib is installed in the dev environment but not in the main
+    # function's deployment artefact.
+    CHART_LAMBDA_FUNCTION_NAME: str | None = None
+    # Ceiling on a single chart render, covering connect, read and retries. Chosen to sit
+    # under the main function's own timeout so a slow render surfaces as a missing chart
+    # rather than by killing the invocation that is delivering the trip summary.
+    CHART_LAMBDA_TIMEOUT_SECONDS: int = 30
     # Abandoned conversation threads are expired after this many seconds. The DynamoDBSaver
     # writes a `ttl` epoch attribute on every checkpoint; DynamoDB's TTL process deletes
     # items past that timestamp automatically. Defaults to 90 days.
