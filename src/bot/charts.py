@@ -10,6 +10,7 @@ which has no such dependency.
 from __future__ import annotations
 
 import io
+import threading
 from collections import defaultdict
 from typing import Any
 
@@ -22,6 +23,11 @@ from src.bot.export import to_sgd
 # Headless rendering: no display is available in Lambda or in CI. Set before any figure
 # is created, which only happens inside the functions below.
 matplotlib.use("Agg")
+
+# pyplot keeps figure state in module-level globals, so two trips ending at once must not
+# render concurrently. Lives here rather than at the call site because it guards this
+# module's state, and every caller needs the same protection.
+_PYPLOT_LOCK = threading.Lock()
 
 # Categorical palette — light mode, fixed order (dataviz reference)
 _COLORS = [
@@ -68,7 +74,8 @@ def generate_charts(
         category_totals[expense["category"]] += sgd
         date_totals[expense["date"]] += sgd
 
-    return _pie_chart(category_totals), _bar_chart(date_totals)
+    with _PYPLOT_LOCK:
+        return _pie_chart(category_totals), _bar_chart(date_totals)
 
 
 def _pie_chart(category_totals: dict[str, float]) -> bytes:
