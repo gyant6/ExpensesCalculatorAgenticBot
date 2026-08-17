@@ -18,8 +18,8 @@ An agentic Telegram chatbot — *Zuzu* — that helps users track overseas trave
 | Local DB | DynamoDB Local (Docker) | Identical boto3 API; switch via `DYNAMODB_ENDPOINT_URL` env var |
 | Conversation state | LangGraph DynamoDB checkpointer (`langgraph-checkpoint-aws`, `DynamoDBSaver`) | Persists full graph state per user; delete checkpoint = clear history |
 | Packaging | `uv` + `pyproject.toml` | Modern Python standard; fast installs; clean Lambda packaging |
-| Charts | `matplotlib` | Generate pie chart (by category) and bar chart (by day) as PNGs in memory; sent as Telegram photos on trip end |
-| CSV export | Python stdlib `csv` | Generate expense CSV with SGD-equivalent column on trip end; sent as Telegram file attachment |
+| Charts | `matplotlib`, in a dedicated Lambda | Generate pie chart (by category) and bar chart (by day) as PNGs in memory; sent as Telegram photos on trip end. Isolated in its own function so the main one never imports matplotlib or numpy |
+| CSV export | Python stdlib `csv` | Generate expense CSV with SGD-equivalent column on trip end; sent as Telegram file attachment. Kept free of matplotlib so `end_trip` can build it in the main function |
 | FX rates | `api.fxratesapi.com` | Free, no auth required, simple GET |
 
 ---
@@ -52,7 +52,10 @@ ExpensesCalculatorAgenticBot/
 │       ├── storage/
 │       │   ├── __init__.py
 │       │   └── dynamodb.py       # DynamoDB client + table operations
-│       ├── charts.py             # pie chart, bar chart, CSV generation for end_trip
+│       ├── charts.py             # pie and bar chart rendering (matplotlib; chart Lambda only)
+│       ├── chart_handler.py      # chart Lambda entrypoint: payload in, base64 PNGs out
+│       ├── charts_client.py      # invokes the chart Lambda from the main function
+│       ├── export.py             # CSV generation and SGD conversion (no matplotlib)
 │       ├── telegram_handler.py   # receives Telegram updates, calls agent
 │       └── config.py             # settings via pydantic-settings
 └── tests/
@@ -126,16 +129,27 @@ User (Telegram app)
   API Gateway (POST /webhook)
         │
         ▼
-  Lambda Function
+  Lambda Function (main)
         │
         ├──► DynamoDB (real, same table schema)
         │         ├── Conversation checkpoints (langgraph-checkpoint-aws)
         │         └── Trip + Expense items
         ├──► Bedrock (Claude Haiku, same region)
-        └──► api.fxratesapi.com
+        ├──► api.fxratesapi.com
+        │
+        └──► Lambda Function (charts)      [trip end only, synchronous invoke]
+                  expenses + FX rates in, two PNGs out.
+                  Reads no database and holds no state.
 ```
 
-The only code difference between local and prod is configuration — no business logic changes.
+The chart function exists so matplotlib and numpy stay out of the main function, which
+would otherwise import them on every cold start — including one that only records an
+expense. It is invoked once per trip end and never on an ordinary message.
+
+Locally the charts are rendered in-process instead of invoked, since matplotlib is
+installed in the dev environment. That branch is on `ENVIRONMENT`, the same switch that
+decides whether secrets come from SSM. Beyond those two branches the code is identical
+between local and prod — no business logic changes.
 
 ---
 
@@ -660,25 +674,51 @@ Tackled in order so the bot is running in prod as early as possible, with securi
 - [x] Terraform: Lambda function + IAM execution role (DynamoDB read/write + Bedrock invoke, SSM GetParameters — least-privilege)
 - [x] Terraform: prod DynamoDB table (same key schema as local, TTL enabled on `ttl` attribute)
 - [x] Sensitive secrets (`TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`) are stored in SSM Parameter Store as SecureString. Terraform creates the parameters with a `REPLACE_ME` placeholder and `ignore_changes = [value]`, so the real value set via CLI is never overwritten by a subsequent apply and never stored in Terraform state. Lambda env vars hold the SSM paths; `config.py` fetches and injects them into `os.environ` before pydantic-settings loads, only when `ENVIRONMENT=production`.
-- [x] Lambda packaging: `scripts/build_lambda.sh` — `uv export --no-dev` → pip install → zip dependencies + src/
-- [ ] Build zip: `bash scripts/build_lambda.sh`
+- [x] Lambda packaging: `scripts/build_lambda.py` — `uv export --no-dev` → `uv pip install` → zip dependencies + src/. Dependencies are resolved for Python 3.13 on `x86_64-unknown-linux-gnu` rather than for the build machine, so a Windows or macOS build produces the same Linux artefact as the CI runner
+
+#### Step 3 — Split chart rendering into its own Lambda
+
+The first build measured **67.8 MB zipped, 197.5 MB unzipped** — past Lambda's 50 MB direct-upload limit. matplotlib, numpy, Pillow, fontTools and kiwisolver account for 37.5 MB zipped (121.4 MB unzipped) of that, and exist solely for the two PNGs sent at trip end. Moving them into a second function puts both artefacts under the limit — roughly 30 MB for the main function and 38 MB for the chart function — so neither needs S3 staging.
+
+Size is what forces the decision, but cold start is the better reason for it. `charts.py` imports matplotlib at module scope and `tools/trip.py` imports `generate_csv` from that same module, so matplotlib and numpy load on **every** cold start of the main function, including one that only records an expense. After the split the main function has no import path to matplotlib at all, and only trip end pays that cost. For a personal bot that idles long enough for containers to be reaped, most messages are cold starts, so this trades a cost on the frequent path for one on the rare path.
+
+- [ ] Extract the matplotlib-free code out of `charts.py` into `src/bot/export.py`: `CSV_FIELDNAMES`, `generate_csv` and `_to_sgd`. `charts.py` keeps only the plotting functions and imports `_to_sgd` from the new module. Update the imports in `tools/trip.py` and `telegram_handler.py`. The condition to verify is direct: no module reachable from `main.lambda_handler` may import matplotlib
+- [ ] Move matplotlib into its own PEP 735 dependency group: `[dependency-groups] charts = [...]`, with `[tool.uv] default-groups` extended so it stays installed locally for `dev_runner` and the tests. A group rather than an optional-dependency extra because `uv export` offers `--only-group` but has no `--only-extra`, and the chart artefact must contain matplotlib and nothing else
+- [ ] `scripts/build_lambda.py`: emit two archives — `function.zip` from `uv export --no-dev --no-default-groups`, `chart_function.zip` from `uv export --only-group charts` — and report both against the 50 MB limit
+- [ ] New handler `src/bot/chart_handler.py`: `lambda_handler(event, context)` taking `{"expenses": [...], "fx_rates": {...}}` and returning base64-encoded PNGs. Expense amounts arrive from DynamoDB as `Decimal`, which `json.dumps` refuses, so the caller serialises them explicitly rather than relying on a default encoder
+- [ ] New client `src/bot/charts_client.py`: `render_charts(expenses, fx_rates)` invokes the chart function synchronously via boto3 with an explicit timeout and returns `None` on any failure. A chart failure must not cost the user their summary or CSV — the same graceful degradation already applied when FX rates are unavailable
+- [ ] `config.py`: `CHART_LAMBDA_FUNCTION_NAME`. Local polling and `dev_runner` render in-process rather than invoking, since matplotlib is installed locally; the branch is on `ENVIRONMENT`, matching the existing SSM branch
+- [ ] Terraform: second `aws_lambda_function` for charts with its own execution role. It touches no DynamoDB, Bedrock or SSM, so that role carries CloudWatch Logs only. Grant the main role `lambda:InvokeFunction` scoped to the chart function ARN
+- [ ] Terraform: `lifecycle { ignore_changes = [filename, source_code_hash] }` on both functions, so code deployed by the AWS CLI is not rolled back by a later `terraform apply`. Terraform owns the infrastructure; the CLI owns the code. Same reasoning as the `ignore_changes` already on the SSM placeholder values
+- [ ] Unit tests: the chart handler returns PNGs for a representative payload; `render_charts` returns `None` and logs when the invoke fails or comes back with a function error
+- [ ] Rebuild and confirm both archives are under 50 MB zipped and their combined unzipped size is under 250 MB
+
+Constraints worth recording:
+- A synchronous invoke caps request and response at 6 MB each. This is a limit on the data passed between the two functions and is unrelated to the 50 MB deployment limit above. PNGs must be base64-encoded to travel in a JSON response, which inflates them by about a third, so the usable image budget is nearer 4.5 MB. Two charts and a small expense list sit far below that. If they ever approached it, the chart function would write the PNG to a bucket and return the object key instead of the bytes
+- Lambda allocates CPU in proportion to memory, so under-provisioning the chart function shows up as slow renders rather than as errors
+- The chart function is a pure function of its input — expenses and FX rates in, PNG bytes out. It reads no database and holds no state, which is what makes it separable at all
+
+#### Step 4 — Build and deploy
+- [ ] Build both archives: `uv run python scripts/build_lambda.py`
 - [ ] Deploy: `terraform apply`
 - [ ] Set real SSM values: `aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --value "<token>" --type SecureString --overwrite --region ap-southeast-1` (and same for admin-telegram-id)
-- [ ] Smoke-test: invoke Lambda directly with a synthetic payload via `aws lambda invoke`
+- [ ] Push code for both functions: `aws lambda update-function-code --function-name <name> --zip-file fileb://<archive>`
+- [ ] Smoke-test: invoke the main Lambda directly with a synthetic payload via `aws lambda invoke`
+- [ ] Record `Init Duration` from the CloudWatch log for a cold start, so the cold-start cost of the split is measured rather than assumed
 
-#### Step 3 — API Gateway + webhook
+#### Step 5 — API Gateway + webhook
 - [ ] Terraform: HTTP API Gateway (POST /webhook → Lambda integration)
 - [ ] Register webhook URL with Telegram (`setWebhook`)
 - [ ] End-to-end test via Telegram
 
-#### Step 4 — Security hardening
+#### Step 6 — Security hardening
 - [ ] Webhook secret token: set `secret_token` at `setWebhook` registration; validate `X-Telegram-Bot-Api-Secret-Token` header in handler before processing
 - [ ] API Gateway resource policy: IP allowlist from Telegram's published CIDR ranges ([cidr.txt](https://core.telegram.org/resources/cidr.txt))
 - [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps IP allowlist in sync with Telegram's published ranges)
 - [ ] IAM role for CIDR updater scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
 - [ ] CloudWatch structured logging validation
 
-#### Step 5 — Bedrock Guardrails
+#### Step 7 — Bedrock Guardrails
 - [ ] Denied topics policy: block off-topic requests (financial advice, general chat) and keep the agent scoped to expense tracking
 - [ ] Prompt attack filter: detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
 
@@ -725,10 +765,9 @@ push to main (after test.yml passes)
         │
         ├── checkout code
         ├── install uv
-        ├── uv export --no-dev -o requirements.txt
-        ├── pip install -r requirements.txt --target package/
-        ├── zip -r function.zip package/ src/
-        └── aws lambda update-function-code --zip-file fileb://function.zip
+        ├── uv run python scripts/build_lambda.py     # builds both archives
+        ├── aws lambda update-function-code --function-name <main>  --zip-file fileb://function.zip
+        └── aws lambda update-function-code --function-name <chart> --zip-file fileb://chart_function.zip
 ```
 
 **AWS credential federation via OIDC (no long-lived keys):**
