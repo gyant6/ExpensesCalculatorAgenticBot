@@ -629,19 +629,19 @@ dev = [
 - [x] `end_trip` summary: text generation + matplotlib chart
 - [x] Clear conversation history when a trip ends: `graph.checkpointer.delete_thread(thread_id)`, called from `handle_callback` and `dev_runner` after the summary and attachments have been delivered. It cannot live inside `end_trip` — `agent_node` writes the summary after the tool returns and needs the message history to do it. Wrap it so a failed deletion cannot fail the user's turn after they already have their summary
 - [x] `enable_checkpoint_compression=True` on `DynamoDBSaver`, which gzips each snapshot before writing and expands it on read (measured ~4.6x). Reduces DynamoDB read and write units only — the state reaching Bedrock is decompressed and identical, so token cost is unchanged
-- [ ] `ttl_seconds` on `DynamoDBSaver`, plus TTL enabled on the table itself, so abandoned threads expire with no active code path required
+- [x] `ttl_seconds` on `DynamoDBSaver`, plus TTL enabled on the table itself, so abandoned threads expire with no active code path required
 - [ ] Prune checkpoint versions within a long trip: `checkpointer.prune([thread_id], strategy="keep_latest")` retains only the most recent checkpoint per namespace. Bounds storage but not token cost — the retained checkpoint still holds the full `messages` list
 - [x] Validate and upper-case `LOG_LEVEL` at settings load, so an invalid value fails with a message naming the setting and the accepted levels rather than a bare `ValueError` raised inside the logging module at import
 - [x] Paginate `query_by_prefix` via the boto3 paginator: a DynamoDB `query` returns at most 1 MB per call, and ignoring `LastEvaluatedKey` silently returned a partial list beyond that. Covered by a unit test that crosses the real 1 MB boundary — moto enforces the same cap, and a single query returned only 83 of 120 padded items
-- [ ] Store `amount` as a DynamoDB Number rather than String, using `Decimal` because boto3 refuses Python floats. Makes it numerically comparable and stops every consumer re-parsing it
-- [ ] Wire up or remove `AWS_BEDROCK_PROFILE` — declared in `config.py` and referenced nowhere, so setting it currently has no effect
-- [ ] Harden `custom_routes` to match any `end_trip` tool call rather than only `tool_calls[0]`. If the model ever emits `get_all_expenses` and `end_trip` in one message, the batch routes to `tools_node`, where `end_trip` is not bound, and the confirmation interrupt never fires
+- [x] Store `amount` as a DynamoDB Number rather than String, using `Decimal` because boto3 refuses Python floats. Makes it numerically comparable and stops every consumer re-parsing it
+- [x] Wire up or remove `AWS_BEDROCK_PROFILE` — removed, since the Bedrock client never read it
+- [x] Harden `custom_routes` to match any `end_trip` tool call rather than only `tool_calls[0]`. A batch mixing `end_trip` with other tools now routes to `end_trip_batch_error_node`, which injects a rejecting `ToolMessage` for every call so the model retries with `end_trip` alone — neither silently skipping `end_trip` nor bypassing the confirmation interrupt
 - [x] Access control: `AUTH#<id>` DynamoDB items, PENDING/APPROVED/REJECTED states
 - [x] Admin approval flow: unknown users trigger Approve/Reject message to admin via inline keyboard
 - [x] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
 - [x] `ADMIN_TELEGRAM_ID` in config (env var / SSM in prod)
 - [x] Manual end-to-end testing via Telegram
-- [ ] Admin command interface: `/auth` is registered as a dedicated `CommandHandler`, which PTB routes directly without passing through `handle_message` or the auth gate. The handler silently ignores the command if `effective_user.id != ADMIN_TELEGRAM_ID` — this is the sole guard, since the auth gate never runs for command handlers. Supported commands:
+- [x] Admin command interface: `/auth` is registered as a dedicated `CommandHandler`, which PTB routes directly without passing through `handle_message` or the auth gate. The handler silently ignores the command if `effective_user.id != ADMIN_TELEGRAM_ID` — this is the sole guard, since the auth gate never runs for command handlers. Supported commands:
   - `/auth list` — list all `AUTH#*` records with their status, entity type, and username
   - `/auth approve <id>` — set status to APPROVED
   - `/auth reject <id>` — set status to REJECTED
