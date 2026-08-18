@@ -56,6 +56,11 @@ resource "aws_dynamodb_table" "expenses" {
 locals {
   ssm_telegram_bot_token_path = "/ExpensesCalculatorAgenticBot/telegram-bot-token"
   ssm_admin_telegram_id_path  = "/ExpensesCalculatorAgenticBot/admin-telegram-id"
+
+  # Named once here because each appears in the function, its log group, and the IAM
+  # policy that scopes writes to that log group.
+  bot_function_name   = "ExpensesCalculatorAgenticBot"
+  chart_function_name = "ExpensesCalculatorAgenticBot-charts"
 }
 
 resource "aws_ssm_parameter" "telegram_bot_token" {
@@ -108,7 +113,15 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/lambda/ExpensesCalculatorAgenticBot:*"
+        Resource = "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/lambda/${local.bot_function_name}:*"
+      },
+      {
+        # Scoped to the chart function alone. This is the only cross-function permission
+        # the bot holds, and charts are the only thing it may ask that function to do.
+        Sid      = "InvokeChartFunction"
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = aws_lambda_function.charts.arn
       },
       {
         Sid    = "DynamoDB"
@@ -149,37 +162,115 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
   })
 }
 
-# ── Lambda function ───────────────────────────────────────────────────────────
+# ── IAM — chart Lambda execution role ─────────────────────────────────────────
+# A separate role because the chart function is a pure function of its input: expenses
+# and rates in, PNG bytes out. It reads no database, calls no model and holds no secrets,
+# so writing its own logs is the only permission it needs. Reusing the bot's role would
+# hand a renderer full read/write access to every expense.
+
+resource "aws_iam_role" "chart_lambda_exec" {
+  name = "ExpensesCalculatorAgenticBot-chart-lambda-exec"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "chart_lambda_exec_policy" {
+  name = "ExpensesCalculatorAgenticBot-chart-lambda-exec-policy"
+  role = aws_iam_role.chart_lambda_exec.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid    = "CloudWatchLogs"
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ]
+      Resource = "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/lambda/${local.chart_function_name}:*"
+    }]
+  })
+}
+
+# ── Lambda functions ──────────────────────────────────────────────────────────
+# Terraform creates these functions; the AWS CLI deploys code into them. The lifecycle
+# blocks below are what keep those two responsibilities from fighting: without them, a
+# terraform apply after a CLI deploy would see prod differing from the zip on disk and
+# roll production back to whatever was last built locally.
+#
+# Both archives must exist before the first apply. Build them with:
+#   uv run python scripts/build_lambda.py
+# Subsequent code deploys:
+#   aws lambda update-function-code --function-name <name> --zip-file fileb://<archive>
 
 resource "aws_lambda_function" "bot" {
-  function_name    = "ExpensesCalculatorAgenticBot"
-  role             = aws_iam_role.lambda_exec.arn
-  # function.zip must exist before the first terraform apply.
-  # Build it with: bash scripts/build_lambda.sh
-  # Subsequent code deploys use: aws lambda update-function-code --zip-file fileb://function.zip
-  filename = "${path.module}/../function.zip"
-  handler  = "src.bot.main.lambda_handler"
-  runtime          = "python3.13"
-  timeout          = var.lambda_timeout
-  memory_size      = var.lambda_memory_mb
+  function_name = local.bot_function_name
+  role          = aws_iam_role.lambda_exec.arn
+  filename      = "${path.module}/../function.zip"
+  handler       = "src.bot.main.lambda_handler"
+  runtime       = "python3.13"
+  architectures = ["x86_64"]
+  timeout       = var.lambda_timeout
+  memory_size   = var.lambda_memory_mb
 
   environment {
     variables = {
-      ENVIRONMENT                 = "production"
-      AWS_REGION                  = var.aws_region
-      AWS_BEDROCK_MODEL_ID        = var.bedrock_model_id
-      DYNAMODB_TABLE_NAME         = var.dynamodb_table_name
-      LOG_LEVEL                   = "INFO"
-      CHECKPOINT_TTL_SECONDS      = "7776000"
-      TELEGRAM_BOT_TOKEN_SSM_PATH = local.ssm_telegram_bot_token_path
-      ADMIN_TELEGRAM_ID_SSM_PATH  = local.ssm_admin_telegram_id_path
+      # AWS_REGION is deliberately absent: it is a reserved Lambda environment variable,
+      # set by the runtime, and supplying it here is rejected at deploy time.
+      ENVIRONMENT                  = "production"
+      AWS_BEDROCK_MODEL_ID         = var.bedrock_model_id
+      DYNAMODB_TABLE_NAME          = var.dynamodb_table_name
+      LOG_LEVEL                    = "INFO"
+      CHECKPOINT_TTL_SECONDS       = "7776000"
+      TELEGRAM_BOT_TOKEN_SSM_PATH  = local.ssm_telegram_bot_token_path
+      ADMIN_TELEGRAM_ID_SSM_PATH   = local.ssm_admin_telegram_id_path
+      CHART_LAMBDA_FUNCTION_NAME   = local.chart_function_name
+      CHART_LAMBDA_TIMEOUT_SECONDS = tostring(var.chart_client_timeout)
     }
   }
 
+  lifecycle {
+    ignore_changes = [filename, source_code_hash]
+  }
+}
 
+resource "aws_lambda_function" "charts" {
+  function_name = local.chart_function_name
+  role          = aws_iam_role.chart_lambda_exec.arn
+  filename      = "${path.module}/../chart_function.zip"
+  handler       = "src.bot.chart_handler.lambda_handler"
+  runtime       = "python3.13"
+  architectures = ["x86_64"]
+  timeout       = var.chart_lambda_timeout
+  memory_size   = var.chart_lambda_memory_mb
+
+  environment {
+    variables = {
+      # Everything this function needs. It never loads config.py, which would demand the
+      # bot token and admin ID it has no business holding.
+      LOG_LEVEL = "INFO"
+    }
+  }
+
+  lifecycle {
+    ignore_changes = [filename, source_code_hash]
+  }
 }
 
 resource "aws_cloudwatch_log_group" "bot" {
-  name              = "/aws/lambda/ExpensesCalculatorAgenticBot"
+  name              = "/aws/lambda/${local.bot_function_name}"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_log_group" "charts" {
+  name              = "/aws/lambda/${local.chart_function_name}"
   retention_in_days = 30
 }
