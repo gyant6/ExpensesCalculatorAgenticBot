@@ -16,6 +16,8 @@ wheels/
 CLAUDE.md
 .env
 
+*.log
+
 # Lambda build artefacts
 function.zip
 chart_function.zip

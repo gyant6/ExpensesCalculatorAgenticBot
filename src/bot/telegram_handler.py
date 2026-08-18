@@ -3,6 +3,9 @@
 import asyncio
 import io
 import logging
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -66,6 +69,49 @@ _AUTH_USAGE = "Usage:\n" + "\n".join(
 _MESSAGE_NOT_MODIFIED = "not modified"
 
 _CSV_FILENAME = "expenses.csv"
+
+
+@contextmanager
+def _timed(timings: dict[str, int], phase: str) -> Iterator[None]:
+    """Record how long a block took, in milliseconds, under the given phase name.
+
+    Args:
+        timings: Accumulator for one turn; the phase is added on exit.
+        phase: Key to record the duration under, e.g. "graph".
+
+    Yields:
+        None. The block runs inside the measurement.
+    """
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        timings[phase] = round((time.perf_counter() - start) * 1000)
+
+
+def _log_timings(
+    turn: str,
+    telegram_user_id: str,
+    timings: dict[str, int],
+    **context: int,
+) -> None:
+    """Emit one line summarising where a turn spent its time.
+
+    A single line per turn rather than one per phase: the volume is then the same as no
+    instrumentation, while still carrying every phase. Logged at INFO because latency is
+    operational data wanted in production, where raising the log level to read it would
+    mean reconfiguring a running function.
+
+    Args:
+        turn: Which handler produced the timings, e.g. "message".
+        telegram_user_id: The user the turn belongs to, for correlation.
+        timings: Phase name to duration in milliseconds; each is suffixed `_ms`.
+        **context: Counts or other non-duration fields, logged under their own names so
+            they are not mistaken for milliseconds.
+    """
+    fields = [f"{phase}_ms={ms}" for phase, ms in timings.items()]
+    fields += [f"{name}={value}" for name, value in context.items()]
+    logger.info("timing turn=%s user=%s %s", turn, telegram_user_id, " ".join(fields))
 
 
 def _config(telegram_user_id: str) -> RunnableConfig:
@@ -211,49 +257,67 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else (update.effective_user.full_name or user_id)
         )
 
-    if not await _check_auth(update, context, auth_id, entity_type, display_name):
+    timings: dict[str, int] = {}
+
+    with _timed(timings, "auth"):
+        authorised = await _check_auth(
+            update, context, auth_id, entity_type, display_name
+        )
+    if not authorised:
         return
 
     message_date = update.message.date.strftime("%Y-%m-%d")
     config = _config(user_id)
 
-    state = await asyncio.to_thread(_graph.get_state, config)
+    with _timed(timings, "state"):
+        state = await asyncio.to_thread(_graph.get_state, config)
     if END_TRIP_NODE in (state.next or ()):
         await update.message.reply_text(
             "Please confirm or cancel the pending trip ending first."
         )
         return
 
-    result = await asyncio.to_thread(
-        _graph.invoke,
-        {
-            "messages": [HumanMessage(content=update.message.text)],
-            "telegram_user_id": user_id,
-            "message_date": message_date,
-        },
-        config,
-    )
+    # Covers the Bedrock round trips, every tool's DynamoDB call, and a checkpoint write
+    # per super-step. A dominant figure here needs breaking down further before it says
+    # anything actionable.
+    with _timed(timings, "graph"):
+        result = await asyncio.to_thread(
+            _graph.invoke,
+            {
+                "messages": [HumanMessage(content=update.message.text)],
+                "telegram_user_id": user_id,
+                "message_date": message_date,
+            },
+            config,
+        )
 
-    state_after = await asyncio.to_thread(_graph.get_state, config)
-    if END_TRIP_NODE in (state_after.next or ()):
-        keyboard = InlineKeyboardMarkup(
-            [
+    with _timed(timings, "state_after"):
+        state_after = await asyncio.to_thread(_graph.get_state, config)
+
+    with _timed(timings, "reply"):
+        if END_TRIP_NODE in (state_after.next or ()):
+            keyboard = InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        "Yes, end trip", callback_data=_END_TRIP_CONFIRM
-                    ),
-                    InlineKeyboardButton("No, cancel", callback_data=_END_TRIP_CANCEL),
+                    [
+                        InlineKeyboardButton(
+                            "Yes, end trip", callback_data=_END_TRIP_CONFIRM
+                        ),
+                        InlineKeyboardButton(
+                            "No, cancel", callback_data=_END_TRIP_CANCEL
+                        ),
+                    ]
                 ]
-            ]
-        )
-        await update.message.reply_text(
-            "Are you sure you want to end the trip? All expenses will be deleted.",
-            reply_markup=keyboard,
-        )
-    else:
-        last_msg = result["messages"][-1]
-        content = _extract_text(last_msg.content) or "(no reply)"
-        await update.message.reply_text(content, parse_mode=_parse_mode(content))
+            )
+            await update.message.reply_text(
+                "Are you sure you want to end the trip? All expenses will be deleted.",
+                reply_markup=keyboard,
+            )
+        else:
+            last_msg = result["messages"][-1]
+            content = _extract_text(last_msg.content) or "(no reply)"
+            await update.message.reply_text(content, parse_mode=_parse_mode(content))
+
+    _log_timings("message", user_id, timings)
 
 
 async def _claim_confirmation(query: CallbackQuery) -> bool:
@@ -411,23 +475,34 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if query.data == _END_TRIP_CONFIRM:
+        timings: dict[str, int] = {}
+
         # Render the attachments first: resuming the graph runs end_trip, which deletes
         # the expenses, so reading them afterwards would silently produce empty charts.
-        expenses = await asyncio.to_thread(
-            query_by_prefix, f"USER#{user_id}", "EXPENSE#"
-        )
-        pie_bytes, bar_bytes, csv_bytes = await asyncio.to_thread(
-            _render_attachments, expenses, user_id
-        )
+        with _timed(timings, "query"):
+            expenses = await asyncio.to_thread(
+                query_by_prefix, f"USER#{user_id}", "EXPENSE#"
+            )
+        # FX fetch, CSV build and chart render together, since they share one call.
+        with _timed(timings, "attachments"):
+            pie_bytes, bar_bytes, csv_bytes = await asyncio.to_thread(
+                _render_attachments, expenses, user_id
+            )
 
-        result = await asyncio.to_thread(_graph.invoke, None, config)
+        with _timed(timings, "graph"):
+            result = await asyncio.to_thread(_graph.invoke, None, config)
         content = _extract_text(result["messages"][-1].content) or "Trip ended."
-        await query.edit_message_text(content, parse_mode=_parse_mode(content))
-        await _send_attachments(query, pie_bytes, bar_bytes, csv_bytes)
+
+        with _timed(timings, "send"):
+            await query.edit_message_text(content, parse_mode=_parse_mode(content))
+            await _send_attachments(query, pie_bytes, bar_bytes, csv_bytes)
 
         # Only once the summary and files are delivered: this discards the history the
         # summary was written from, and the next trip starts with a clean thread.
-        await asyncio.to_thread(clear_thread_history, _graph, user_id)
+        with _timed(timings, "clear"):
+            await asyncio.to_thread(clear_thread_history, _graph, user_id)
+
+        _log_timings("end_trip", user_id, timings, expenses=len(expenses))
     else:
         last_ai = state.values["messages"][-1]
         tool_call_id = last_ai.tool_calls[0]["id"]
