@@ -3,11 +3,6 @@ variable "aws_region" {
   type        = string
 }
 
-variable "aws_account_id" {
-  description = "AWS account ID, used to scope IAM policies."
-  type        = string
-}
-
 variable "dynamodb_table_name" {
   description = "DynamoDB table name. Must match DYNAMODB_TABLE_NAME in Lambda env."
   type        = string

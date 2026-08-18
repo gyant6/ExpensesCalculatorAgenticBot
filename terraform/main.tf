@@ -18,6 +18,8 @@ provider "aws" {
   }
 }
 
+data "aws_caller_identity" "current" {}
+
 # ── DynamoDB ──────────────────────────────────────────────────────────────────
 
 resource "aws_dynamodb_table" "expenses" {
@@ -113,7 +115,7 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/lambda/${local.bot_function_name}:*"
+        Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${local.bot_function_name}:*"
       },
       {
         # Scoped to the chart function alone. This is the only cross-function permission
@@ -148,15 +150,15 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
         Effect = "Allow"
         Action = ["ssm:GetParameters"]
         Resource = [
-          "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter${local.ssm_telegram_bot_token_path}",
-          "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter${local.ssm_admin_telegram_id_path}"
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_telegram_bot_token_path}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_admin_telegram_id_path}"
         ]
       },
       {
         Sid      = "SSMDecrypt"
         Effect   = "Allow"
         Action   = ["kms:Decrypt"]
-        Resource = "arn:aws:kms:${var.aws_region}:${var.aws_account_id}:alias/aws/ssm"
+        Resource = "arn:aws:kms:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alias/aws/ssm"
       }
     ]
   })
@@ -195,7 +197,7 @@ resource "aws_iam_role_policy" "chart_lambda_exec_policy" {
         "logs:CreateLogStream",
         "logs:PutLogEvents"
       ]
-      Resource = "arn:aws:logs:${var.aws_region}:${var.aws_account_id}:log-group:/aws/lambda/${local.chart_function_name}:*"
+      Resource = "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/${local.chart_function_name}:*"
     }]
   })
 }

@@ -1,12 +1,13 @@
-# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored; this file is not,
-# so it must never hold real account IDs or secrets.
+# Deployment configuration, committed on purpose: this is the description of what is
+# actually deployed, and keeping it on one machine would leave the repo unable to
+# reproduce its own infrastructure.
 #
-# No secrets belong here at all. TELEGRAM_BOT_TOKEN and ADMIN_TELEGRAM_ID live in SSM
-# Parameter Store, set once by CLI after the first apply, and are never read into
-# Terraform state.
+# Nothing secret belongs here. TELEGRAM_BOT_TOKEN and ADMIN_TELEGRAM_ID live in SSM
+# Parameter Store, set by CLI after the first apply, and never enter Terraform state.
+# The account ID is not here either — it is read from the credentials in use via
+# data.aws_caller_identity.
 
-aws_region     = "ap-southeast-1"
-aws_account_id = "000000000000"
+aws_region = "ap-southeast-1"
 
 dynamodb_table_name = "ExpensesCalculator"
 bedrock_model_id    = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
