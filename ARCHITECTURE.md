@@ -70,6 +70,7 @@ ExpensesCalculatorAgenticBot/
     │   ├── test_charts.py
     │   ├── test_chart_handler.py
     │   ├── test_charts_client.py
+    │   ├── test_chart_contract.py
     │   ├── test_auth.py
     │   ├── test_graph.py
     │   ├── test_prompts.py
@@ -259,25 +260,37 @@ START
 [check_trip_status]
   │  (reads TRIP#ACTIVE from DynamoDB, sets trip_start_date in state)
   ▼
-[agent_node] ◄──────────────────────────────────────────┐
-  │                                                     │
-  │  custom_routes(state) inspects the last message:     │
-  │                                                     │
-  ├── no tool_calls ────────────────────────────► END    │
-  │                                                     │
-  ├── tool_calls[0]["name"] == "end_trip"                │
-  │        └──► [end_trip_node] ─────────────────────────┤
-  │               interrupt_before: graph pauses here    │
-  │               before the tool executes, persists     │
-  │               state, and returns to the handler      │
-  │                                                     │
-  └── any other tool                                    │
-           └──► [tools_node] ────────────────────────────┘
+[agent_node] ◄────────────────────────────────────────────────┐
+  │                                                           │
+  │  custom_routes(state) inspects the last message:          │
+  │                                                           │
+  ├── not an AIMessage, or no tool_calls ─────────────► END    │
+  │                                                           │
+  ├── end_trip is the only tool call                          │
+  │        └──► [end_trip_node] ───────────────────────────────┤
+  │               interrupt_before: graph pauses here          │
+  │               before the tool executes, persists           │
+  │               state, and returns to the handler            │
+  │                                                           │
+  ├── end_trip batched with other tools                       │
+  │        └──► [end_trip_batch_error_node] ───────────────────┤
+  │               injects a rejecting ToolMessage for every    │
+  │               call in the batch, so the model retries      │
+  │               with end_trip alone                          │
+  │                                                           │
+  └── only non-end_trip tools                                 │
+           └──► [tools_node] ──────────────────────────────────┘
                   start_trip, add_expense, edit_expense,
                   delete_expense, get_all_expenses
 ```
 
-This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls Claude Haiku with the bound tools. `custom_routes` then inspects the last message: no tool calls ends the turn, an `end_trip` call routes to `end_trip_node`, and any other tool call routes to `tools_node`. Both tool nodes edge back to `agent_node`, so the loop continues until Claude returns a plain message.
+The batch case exists because routing a mixed batch either way loses a call silently:
+`tools_node` has no `end_trip` bound, and `end_trip_node` has none of the others. Worse,
+`tools_node` is not interrupted, so a batched `end_trip` would skip the confirmation
+entirely. Rejecting the whole batch is the only option that neither drops a tool call nor
+deletes a trip without asking.
+
+This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls Claude Haiku with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. All three tool nodes edge back to `agent_node`, so the loop continues until Claude returns a plain message.
 
 `end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
 
@@ -521,7 +534,11 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_charts.py` | `generate_charts` returns PNG bytes for a populated trip, for an empty one, and when no expense has a usable rate |
 | `test_chart_handler.py` | The chart Lambda returns both images base64-encoded, renders placeholders for a trip with no expenses, and rejects an event missing a required key or carrying a non-list `expenses` |
 | `test_charts_client.py` | Decimal amounts serialise to strings and the payload survives `json.dumps`; the local path renders in-process and never invokes; the production path invokes with the expected payload and decodes both images; `None` is returned when the invoke is rejected, times out, reports a function error, returns an incomplete payload, or the function name is unset |
+| `test_chart_contract.py` | A payload built by the real `charts_client` serialiser, passed through an actual JSON round-trip into the real `chart_handler`. Each side's own tests mock the other, so the two could drift apart while both suites stayed green; this catches value-encoding drift in particular, since `chart_protocol` already prevents key renames. Confirmed non-vacuous by mutation — removing the `Decimal` conversion fails six tests |
 | `test_auth.py` | `_check_auth`: first contact creates PENDING and notifies admin; PENDING/REJECTED/APPROVED return correct bool and send correct replies; group uses negative chat ID; missing username falls back to full name. `handle_auth_callback`: approve/reject update DynamoDB status and notify requester; missing auth record edits message without sending notification; group approval notifies the group chat |
+| `test_graph.py` | `custom_routes` returns END for a non-AIMessage or a message with no tool calls, `end_trip` for a lone `end_trip` call, `end_trip_batch_error` for a mixed batch, and `tools` otherwise; `end_trip_batch_error_node` emits one rejecting `ToolMessage` per call in the batch |
+| `test_telegram_handler.py` | `_parse_mode` and `_extract_text`; `handle_admin_command` ignores non-admins, prints usage for no or unknown subcommand, lists records, approves, rejects, deletes, and reports a missing record |
+| `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
 
@@ -538,6 +555,30 @@ Test the full tool chain against a real DynamoDB Local instance (Docker). These 
 ```bash
 pytest tests/integration/ -m integration
 ```
+
+#### Layer 2b — Manual end-to-end run via Telegram
+
+Not automated, and worth keeping as a written procedure because it reaches paths nothing
+else does: the live Bedrock loop, the inline keyboards, and whether the model's reported
+figures actually match what the tools computed. Run it against DynamoDB Local with
+`docker compose up -d`, then `uv run python -m src.bot.main`.
+
+The sequence, and what each part is actually testing:
+
+| Step | Verifies |
+|---|---|
+| Message the bot from an unapproved account, approve from the admin account | `_check_auth` first contact and `handle_auth_callback`; the Approve button's callback data is built from `AuthCommand`, so a mismatch breaks here |
+| `/auth list`, `/auth`, `/auth banana` | The admin command's list, usage and unknown-subcommand branches |
+| Start a trip; add expenses in three currencies, one with no currency named, one dated "yesterday" | `amount` persisted as a DynamoDB Number; the SGD default; relative date resolution against `message_date` |
+| List, edit one amount, delete another, list again | Positional targeting; `update_item` rather than the transact path when the date is unchanged, which leaves the SK intact; `source_message` appended not replaced |
+| End trip, confirm | The interrupt and inline keyboard; **compare the SGD total in the summary text against the sum of `amount_sgd` in the CSV** — a mismatch is the model inventing a rate rather than reading the tool output |
+| Ask about the previous trip | `clear_thread_history`: the table should hold no checkpoint items and the agent should not recall the trip |
+| Tap the confirmation button repeatedly | `_claim_confirmation` — one summary and one set of attachments, not several |
+
+**What this cannot reach.** Locally `render_charts` takes the in-process branch, so the
+boto3 invoke, `chart_handler` running as a Lambda, and the `lambda:InvokeFunction` grant
+are all untouched by a green run here. The payload compatibility is covered by
+`test_chart_contract.py`; the invoke itself is what the Step 4 smoke test is for.
 
 #### Layer 3 — LLM Evaluations (`tests/evals/`)
 
@@ -602,7 +643,12 @@ Results appear in the LangSmith UI under the `expenses-bot` project.
 
 ### Coverage
 
-Configured in `pyproject.toml`. Coverage is measured over `src/` only.
+**Not yet configured.** `pyproject.toml` has no `[tool.coverage]` sections, so there is no
+`fail_under` gate and nothing enforces the targets below — they are goals, not guarantees.
+Adding the config and ratcheting the threshold is an open Phase 3 item, and it only bites
+once CI exists, since a local run can always be skipped.
+
+The intended configuration:
 
 ```toml
 [tool.coverage.run]
@@ -614,19 +660,21 @@ fail_under = 80
 show_missing = true
 ```
 
-**Targets by module:**
+**Targets against measured coverage** (151 tests, `--cov=src`):
 
-| Module | Target | Rationale |
-|---|---|---|
-| `tools/` | 90% | Pure business logic; fully unit-testable |
-| `storage/` | 90% | Deterministic DynamoDB wrappers |
-| `agent/graph.py` | 70% | Graph wiring; LLM calls excluded |
-| `config.py` | 85% | Straightforward but worth checking env var handling |
-| Overall | 80% | CI hard minimum — PR fails below this |
+| Module | Target | Measured | |
+|---|---|---|---|
+| `tools/` | 90% | 100% | trip, expenses and fx all fully covered |
+| `storage/` | 90% | 94% | |
+| `agent/graph.py` | 70% | 85% | |
+| `config.py` | 85% | 66% | the SSM loader only runs under `ENVIRONMENT=production` |
+| `telegram_handler.py` | — | 58% | the largest gap; the async Telegram paths are the least covered |
+| `main.py` | — | 0% | entrypoint, excluded by the `omit` above once configured |
+| Overall | 80% | **78%** | |
 
 **Running with coverage:**
 ```bash
-pytest tests/unit/ --cov --cov-report=term-missing --cov-report=html
+uv run pytest --cov=src --cov-report=term-missing
 ```
 
 ### Dev Dependencies (`pyproject.toml`)
