@@ -16,7 +16,7 @@ import base64
 import json
 import logging
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import boto3
 from botocore.config import Config
@@ -38,9 +38,12 @@ logger = logging.getLogger(__name__)
 # Field Lambda sets when the function itself raised, as opposed to the invoke failing.
 # A function error still returns HTTP 200 with the traceback as the payload, so it has to
 # be checked explicitly or a stack trace would be decoded as if it were an image.
-_FUNCTION_ERROR_KEY = "FunctionError"
+_FUNCTION_ERROR_KEY: Final = "FunctionError"
 
-_INVOCATION_TYPE_SYNCHRONOUS = "RequestResponse"
+# Final rather than a bare assignment so the type narrows to the literal, which is what
+# the Lambda client's InvocationType accepts. Without it the constant widens to str and a
+# typo here would only surface as a failed invoke at trip end.
+_INVOCATION_TYPE_SYNCHRONOUS: Final = "RequestResponse"
 
 
 def _get_client() -> LambdaClient:
