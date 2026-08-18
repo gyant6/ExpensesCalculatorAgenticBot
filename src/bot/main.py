@@ -10,11 +10,13 @@ import logging
 from typing import Any
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     filters,
 )
@@ -67,6 +69,39 @@ for _noisy_logger in ("httpx", "httpcore", "langgraph_checkpoint_aws"):
 logger = logging.getLogger(__name__)
 
 
+async def _log_handler_error(
+    update: object, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Log any exception a handler let escape, and tell the user their turn failed.
+
+    Without a registered error handler PTB logs the traceback and nothing else, so a
+    failed turn is indistinguishable from a slow one: the user waits for a reply that is
+    never coming, and in production the only trace is a stack in CloudWatch nobody is
+    watching. This does not attempt recovery — the turn is already lost — it makes the
+    failure visible on both ends.
+
+    Args:
+        update: The update being processed, or None if the failure was not update-bound.
+        context: PTB context; `context.error` holds the exception.
+    """
+    logger.exception(
+        "Unhandled error while processing an update", exc_info=context.error
+    )
+
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="Something went wrong handling that. Please try again.",
+        )
+    except TelegramError:
+        # The notification is best effort; failing to deliver it must not mask the
+        # original error above, which is the one worth reading.
+        logger.exception("Could not notify the user about the previous error")
+
+
 def _build_app() -> Application:  # type: ignore[type-arg]
     """Build the PTB Application with all handlers registered.
 
@@ -81,6 +116,7 @@ def _build_app() -> Application:  # type: ignore[type-arg]
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback, pattern="^end_trip:"))
     app.add_handler(CallbackQueryHandler(handle_auth_callback, pattern="^auth:"))
+    app.add_error_handler(_log_handler_error)
     return app
 
 

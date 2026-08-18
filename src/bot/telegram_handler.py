@@ -64,9 +64,15 @@ _AUTH_USAGE = "Usage:\n" + "\n".join(
     for command in AuthCommand
 )
 
-# Fragment of the Telegram Bot API error returned when an edit would leave the message
-# unchanged. Matched on text because the API exposes no distinct error code for it.
+# Fragments of Telegram Bot API errors. Matched on text because the API exposes no
+# distinct error codes for them.
 _MESSAGE_NOT_MODIFIED = "not modified"
+_QUERY_EXPIRED = "query is too old"
+
+# Shown in place of the confirmation keyboard while the trip is being ended, then
+# overwritten with the summary. Ending a trip takes several seconds — an FX fetch, chart
+# rendering, and two model round trips — so the tap needs visible acknowledgement.
+_ENDING_TRIP_NOTICE = "Ending your trip and putting your summary together…"
 
 _CSV_FILENAME = "expenses.csv"
 
@@ -320,26 +326,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _log_timings("message", user_id, timings)
 
 
-async def _claim_confirmation(query: CallbackQuery) -> bool:
-    """Remove the inline keyboard, claiming the pending confirmation for this caller.
+async def _acknowledge_callback(query: CallbackQuery) -> None:
+    """Clear the client-side loading state on a tapped inline button.
 
-    Telegram rejects an edit that would leave a message unchanged, so of two concurrent
-    taps on the same keyboard exactly one succeeds in removing it. That makes this edit
-    the lock on the confirmation, without the handler holding any state of its own.
+    Telegram expires a callback query a short while after the tap, and updates are
+    processed one at a time — so a second tap queued behind a trip end, which takes
+    several seconds, reaches this call with an ID Telegram has already discarded. That is
+    a duplicate tap rather than a fault, and the caller goes on to reject it properly at
+    the confirmation claim.
+
+    Args:
+        query: The callback query to acknowledge.
+
+    Raises:
+        telegram.error.TelegramError: If the call fails for any reason other than the
+            query having expired.
+    """
+    try:
+        await query.answer()
+    except BadRequest as exc:
+        if _QUERY_EXPIRED in str(exc).lower():
+            logger.info("Ignoring expired callback query; likely a repeated tap")
+            return
+        raise
+
+
+async def _claim_confirmation(query: CallbackQuery) -> bool:
+    """Replace the keyboard with a progress notice, claiming the confirmation.
+
+    Telegram rejects an edit that would leave a message unchanged, so of two taps on the
+    same keyboard exactly one succeeds in rewriting it. That makes this edit the lock on
+    the confirmation, without the handler holding any state of its own — the second tap
+    writes identical text and is rejected as unmodified.
+
+    Editing the text rather than just dropping the keyboard also gives the user something
+    to read: ending a trip takes several seconds, and this message is edited again with
+    the summary once the work is done, so no extra message appears or has to be cleaned up.
 
     Args:
         query: The callback query whose message carries the inline keyboard.
 
     Returns:
-        True if this call removed the keyboard and therefore owns the confirmation,
-        False if the keyboard had already been removed by another tap.
+        True if this call claimed the confirmation, False if another tap already had.
 
     Raises:
         telegram.error.TelegramError: If the edit fails for any reason other than the
             message already being unmodified.
     """
     try:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await query.edit_message_text(_ENDING_TRIP_NOTICE, reply_markup=None)
     except BadRequest as exc:
         if _MESSAGE_NOT_MODIFIED in str(exc).lower():
             return False
@@ -456,13 +491,12 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
     if not query or not update.effective_user:
         return
 
-    await query.answer()
+    await _acknowledge_callback(query)
 
     user_id = str(update.effective_user.id)
 
-    # Claim before touching the graph: python-telegram-bot processes updates
-    # concurrently, so a second tap can otherwise pass the state check below while this
-    # one is still running and resume end_trip twice.
+    # Claim before touching the graph, so a second tap cannot pass the state check below
+    # and resume end_trip twice.
     if not await _claim_confirmation(query):
         logger.info("Ignoring duplicate end_trip confirmation from user %s", user_id)
         return
@@ -548,7 +582,7 @@ async def handle_auth_callback(
     if not query:
         return
 
-    await query.answer()
+    await _acknowledge_callback(query)
 
     data = query.data or ""
     if data.startswith(_AUTH_APPROVE_PREFIX):
