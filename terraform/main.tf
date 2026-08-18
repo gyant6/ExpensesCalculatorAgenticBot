@@ -63,6 +63,10 @@ locals {
   # policy that scopes writes to that log group.
   bot_function_name   = "ExpensesCalculatorAgenticBot"
   chart_function_name = "ExpensesCalculatorAgenticBot-charts"
+
+  # Strips the cross-region routing prefix, so global.anthropic.claude-haiku-4-5... names
+  # the foundation model anthropic.claude-haiku-4-5... that the profile routes to.
+  bedrock_foundation_model_id = replace(var.bedrock_model_id, "/^(global|us|eu|apac)\\./", "")
 }
 
 resource "aws_ssm_parameter" "telegram_bot_token" {
@@ -140,10 +144,16 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
         Resource = aws_dynamodb_table.expenses.arn
       },
       {
-        Sid      = "Bedrock"
-        Effect   = "Allow"
-        Action   = ["bedrock:InvokeModel"]
-        Resource = "arn:aws:bedrock:*::foundation-model/${var.bedrock_model_id}"
+        # Invoking through an inference profile is authorised against both the profile
+        # and every foundation model it can route to, so granting only one of the two
+        # fails at runtime. The region wildcard covers a global profile's routing.
+        Sid    = "Bedrock"
+        Effect = "Allow"
+        Action = ["bedrock:InvokeModel"]
+        Resource = [
+          "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
+          "arn:aws:bedrock:*::foundation-model/${local.bedrock_foundation_model_id}"
+        ]
       },
       {
         Sid    = "SSMSecrets"
