@@ -352,29 +352,32 @@ async def _acknowledge_callback(query: CallbackQuery) -> None:
 
 
 async def _claim_confirmation(query: CallbackQuery) -> bool:
-    """Replace the keyboard with a progress notice, claiming the confirmation.
+    """Remove the inline keyboard, claiming the pending confirmation for this caller.
 
     Telegram rejects an edit that would leave a message unchanged, so of two taps on the
-    same keyboard exactly one succeeds in rewriting it. That makes this edit the lock on
-    the confirmation, without the handler holding any state of its own — the second tap
-    writes identical text and is rejected as unmodified.
+    same keyboard exactly one succeeds in removing it. That makes this edit the lock on
+    the confirmation, without the handler holding any state of its own.
 
-    Editing the text rather than just dropping the keyboard also gives the user something
-    to read: ending a trip takes several seconds, and this message is edited again with
-    the summary once the work is done, so no extra message appears or has to be cleaned up.
+    The claim must be the keyboard removal specifically, because that outcome is reached
+    once and never again — the message ends with no keyboard whatever else happens to it.
+    Claiming by writing known text instead is only exclusive while the message still
+    holds that text: once the winning tap replaces it with the summary, a queued second
+    tap writes the text successfully, claims a confirmation that is already finished, and
+    overwrites the summary with a stale-confirmation notice.
 
     Args:
         query: The callback query whose message carries the inline keyboard.
 
     Returns:
-        True if this call claimed the confirmation, False if another tap already had.
+        True if this call removed the keyboard and therefore owns the confirmation,
+        False if the keyboard had already been removed by another tap.
 
     Raises:
         telegram.error.TelegramError: If the edit fails for any reason other than the
             message already being unmodified.
     """
     try:
-        await query.edit_message_text(_ENDING_TRIP_NOTICE, reply_markup=None)
+        await query.edit_message_reply_markup(reply_markup=None)
     except BadRequest as exc:
         if _MESSAGE_NOT_MODIFIED in str(exc).lower():
             return False
@@ -510,6 +513,11 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
 
     if query.data == _END_TRIP_CONFIRM:
         timings: dict[str, int] = {}
+
+        # Ending a trip takes several seconds — an FX fetch, chart rendering and two model
+        # round trips — so say so rather than leaving the tap unacknowledged. This message
+        # is edited again with the summary below, so nothing extra appears in the chat.
+        await query.edit_message_text(_ENDING_TRIP_NOTICE)
 
         # Render the attachments first: resuming the graph runs end_trip, which deletes
         # the expenses, so reading them afterwards would silently produce empty charts.
