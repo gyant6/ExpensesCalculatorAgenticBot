@@ -76,6 +76,11 @@ _ENDING_TRIP_NOTICE = "Ending your trip and putting your summary together…"
 
 _CSV_FILENAME = "expenses.csv"
 
+# Shown when the graph completes with no text to send. The tools have usually already run
+# by this point, so the turn succeeded even though there is nothing to report — the
+# wording says that rather than implying a fault.
+_EMPTY_REPLY_FALLBACK = "Done."
+
 
 @contextmanager
 def _timed(timings: dict[str, int], phase: str) -> Iterator[None]:
@@ -150,6 +155,38 @@ def _extract_text(content: str | list[Any]) -> str:
         if isinstance(block, dict) and block.get("type") == "text"
     ]
     return "\n".join(texts)
+
+
+def _log_empty_reply(telegram_user_id: str, message: Any) -> None:
+    """Record the shape of a final message that yielded no text.
+
+    Seen once in production: the tool ran and the expense was stored, but the turn ended
+    with nothing to send. Two causes are indistinguishable from the outside — the model
+    returned no text, or `_extract_text` discarded blocks whose shape it does not
+    recognise, which would be the more serious of the two and is currently silent.
+
+    Logs the block types and the message class rather than the content itself, which can
+    hold the user's expense text.
+
+    Args:
+        telegram_user_id: The user whose turn produced no text, for correlation.
+        message: The final message from the graph, whatever type it turned out to be.
+    """
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        shape: object = [
+            sorted(block) if isinstance(block, dict) else type(block).__name__
+            for block in content
+        ]
+    else:
+        shape = type(content).__name__
+    logger.warning(
+        "Empty reply for user %s: message=%s blocks=%s tool_calls=%s",
+        telegram_user_id,
+        type(message).__name__,
+        shape,
+        len(getattr(message, "tool_calls", []) or []),
+    )
 
 
 async def _check_auth(
@@ -320,7 +357,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         else:
             last_msg = result["messages"][-1]
-            content = _extract_text(last_msg.content) or "(no reply)"
+            content = _extract_text(last_msg.content)
+            if not content:
+                _log_empty_reply(user_id, last_msg)
+                content = _EMPTY_REPLY_FALLBACK
             await update.message.reply_text(content, parse_mode=_parse_mode(content))
 
     _log_timings("message", user_id, timings)
