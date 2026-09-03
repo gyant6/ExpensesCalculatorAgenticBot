@@ -7,6 +7,16 @@
 # The account ID is not here either — it is read from the credentials in use via
 # data.aws_caller_identity.
 
+# The account ID and the local AWS profile are deliberately absent. They live in
+# local.auto.tfvars, which is gitignored and loaded automatically:
+#
+#   aws_account_id = "<the account these resources belong in>"
+#   aws_profile    = "<named profile, when the machine holds more than one credential>"
+#
+# aws_account_id has no default, so a clone without that file fails asking for it rather
+# than planning against whichever account is default. CI supplies it as
+# TF_VAR_aws_account_id and leaves aws_profile unset to use OIDC credentials.
+
 aws_region = "ap-southeast-1"
 
 dynamodb_table_name = "ExpensesCalculator"
