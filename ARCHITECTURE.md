@@ -1065,7 +1065,36 @@ uv run pre-commit run --all-files
 - [ ] Deploy IAM role with trust policy scoped to this repo + main branch
 - [ ] Manual approval gate before prod deploy (GitHub Actions environment protection rule)
 
-### Phase 4 — Enhancements (future)
+### Phase 4 — Shared-ledger correctness (future)
+
+Consequences of scoping the ledger to the chat rather than the sender. None of these
+existed while every member had a private trip, and none is urgent for a couple of people
+being careful — but each is a silent failure rather than a loud one, so they are recorded
+before anyone relies on a group for a real trip.
+
+- [ ] **Positional commands are a race between members.** `edit_expense` and
+  `delete_expense` take a 1-based index from `get_all_expenses`, which is stable for one
+  user and not for two: A lists and sees yogurt at #1, B deletes an earlier item, the
+  positions shift, and A's "delete 1" removes something else. It deletes the wrong expense
+  rather than failing, which is the worst shape for a bug. Nearly observed in the first
+  group test, where both members happened to refer to expenses by name. Matching on
+  summary — which is how people phrase it anyway — removes the window; positions could
+  stay as a fallback for genuine ambiguity
+- [ ] **Concurrent turns share one checkpoint thread.** Two members messaging at the same
+  time produce two Lambda invocations against the same `thread_id`, each reading and
+  writing the whole conversation state. Expense data is unaffected — the tools write to
+  DynamoDB directly, under distinct sort keys — but one invocation can overwrite history
+  that never included the other's turn, so the agent loses context it appeared to have.
+  Observed working in the first group test; the failure is silent when it does occur
+- [ ] **Expenses record no author.** `source_message` keeps what was typed but not who
+  typed it, so a shared ledger cannot answer "who paid for the broccoli" — which is the
+  first question anyone splitting costs will ask. Needs a field on the expense item, and
+  surfacing in `get_all_expenses` and the CSV
+- [ ] **The partition key still reads `USER#<ledger_id>`** while holding a group ID. A
+  rename to something neutral is a data migration, so it is deliberately deferred; the
+  cheapest moment is whenever the table is next empty
+
+### Phase 5 — Enhancements (future)
 - [ ] Receipt image parsing (user sends photo, agent extracts expense via vision)
 - [ ] Budget alerts (warn user when spending exceeds a threshold)
 - [ ] FX rate caching per day (avoid redundant API calls for same currency on same day)
