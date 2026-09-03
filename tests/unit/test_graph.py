@@ -12,7 +12,7 @@ from src.bot.tools.trip import end_trip
 def _state(*messages: AnyMessage) -> AgentState:
     return AgentState(
         messages=list(messages),
-        telegram_user_id="111",
+        ledger_id="111",
         message_date="2026-01-01",
     )
 

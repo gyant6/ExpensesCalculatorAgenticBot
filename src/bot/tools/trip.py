@@ -33,7 +33,7 @@ FX_UNAVAILABLE_NOTICE = (
 
 @tool
 def start_trip(
-    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    ledger_id: Annotated[str, InjectedState("ledger_id")],
 ) -> str:
     """Start a new overseas trip for the user.
 
@@ -42,7 +42,7 @@ def start_trip(
     a trip, going travelling, or similar.
 
     Args:
-        telegram_user_id: The Telegram user ID of the user starting the trip.
+        ledger_id: The Telegram user ID of the user starting the trip.
 
     Returns:
         A confirmation string with the start date, or an error string if a trip
@@ -51,13 +51,13 @@ def start_trip(
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    if dynamodb.get_item(f"USER#{telegram_user_id}", "TRIP#ACTIVE"):
+    if dynamodb.get_item(f"USER#{ledger_id}", "TRIP#ACTIVE"):
         return "There is already an active trip."
 
     start_date = (datetime.now(tz=ZoneInfo("Asia/Singapore"))).strftime("%Y-%m-%d")
     dynamodb.put_item(
         {
-            "PK": f"USER#{telegram_user_id}",
+            "PK": f"USER#{ledger_id}",
             "SK": "TRIP#ACTIVE",
             "start_date": start_date,
         }
@@ -68,7 +68,7 @@ def start_trip(
 
 @tool
 def end_trip(
-    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    ledger_id: Annotated[str, InjectedState("ledger_id")],
 ) -> str:
     """End the active trip, export its expenses as CSV, and delete all trip records.
 
@@ -80,7 +80,7 @@ def end_trip(
     intact rather than destroying records with no copy of them.
 
     Args:
-        telegram_user_id: The Telegram user ID of the user ending the trip.
+        ledger_id: The Telegram user ID of the user ending the trip.
 
     Returns:
         A confirmation line followed by a CSV of every expense in the trip, including an
@@ -92,7 +92,7 @@ def end_trip(
     Raises:
         botocore.exceptions.ClientError: If a DynamoDB request fails.
     """
-    pk = f"USER#{telegram_user_id}"
+    pk = f"USER#{ledger_id}"
     if dynamodb.get_item(pk, "TRIP#ACTIVE") is None:
         return NO_ACTIVE_TRIP
 
@@ -106,7 +106,7 @@ def end_trip(
         except (httpx.HTTPError, RuntimeError, ValidationError):
             logger.exception(
                 "FX rate fetch failed for user %s; ending trip without SGD conversion",
-                telegram_user_id,
+                ledger_id,
             )
             rates_unavailable = True
 

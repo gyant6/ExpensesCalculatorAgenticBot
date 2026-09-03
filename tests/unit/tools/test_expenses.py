@@ -26,7 +26,7 @@ def test_add_expense(
 
         invoke_input: dict[str, Any] = {
             **base_expense,
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "message_date": "2026-01-30",
             "payment_method": "Card",
         }
@@ -57,7 +57,7 @@ def test_add_expense_default_payment_method(
 
         invoke_input: dict[str, Any] = {
             **base_expense,
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "message_date": "2026-01-30",
         }
         tool_output = expenses.add_expense.invoke(invoke_input)
@@ -85,7 +85,7 @@ def test_add_expense_no_date_falls_back_to_message_date(
 
         invoke_input: dict[str, Any] = {
             **base_expense,
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "message_date": "2026-01-30",
             "payment_method": "PayNow",
             "date": None,
@@ -102,7 +102,7 @@ def test_add_expense_no_date_falls_back_to_message_date(
 def test_add_expense_invalid_date_format(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
+        "ledger_id": TELEGRAM_USER_ID,
         "message_date": "2026-01-30",
         "date": "2023-13-20",
     }
@@ -114,7 +114,7 @@ def test_add_expense_invalid_date_format(base_expense: dict[str, Any]) -> None:
 def test_add_expense_invalid_amount(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
+        "ledger_id": TELEGRAM_USER_ID,
         "message_date": "2026-01-30",
         "amount": "invalid_amount",
     }
@@ -129,7 +129,7 @@ def test_add_expense_invalid_amount(base_expense: dict[str, Any]) -> None:
 def test_add_expense_zero_amount(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
+        "ledger_id": TELEGRAM_USER_ID,
         "message_date": "2026-01-30",
         "amount": "0",
     }
@@ -144,7 +144,7 @@ def test_add_expense_zero_amount(base_expense: dict[str, Any]) -> None:
 def test_add_expense_negative_amount(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
+        "ledger_id": TELEGRAM_USER_ID,
         "message_date": "2026-01-30",
         "amount": "-1.35",
     }
@@ -159,7 +159,7 @@ def test_add_expense_negative_amount(base_expense: dict[str, Any]) -> None:
 def test_add_expense_invalid_category(base_expense: dict[str, Any]) -> None:
     invoke_input: dict[str, Any] = {
         **base_expense,
-        "telegram_user_id": TELEGRAM_USER_ID,
+        "ledger_id": TELEGRAM_USER_ID,
         "message_date": "2026-01-30",
         "category": "Casino",
     }
@@ -202,7 +202,7 @@ def test_edit_expense_no_date_change_multiple_fields(
         mock_dt.now.return_value = update_datetime
 
         invoke_input: dict[str, Any] = {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             **edit_fields,
         }
@@ -257,7 +257,7 @@ def test_edit_expense_date_change_earlier_date(
     new_date = "2026-01-14"
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Change date of 1 to jan 14 2026",
             "summary": "Breakfast at Yakun on 2026-01-14 6.13 SGD",
@@ -305,7 +305,7 @@ def test_edit_expense_date_change_reorders_list(
     new_date = "2026-01-17"
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Change date of 1 to jan 17 2026",
             "summary": "Breakfast at Yakun on 2026-01-17 6.13 SGD",
@@ -325,7 +325,7 @@ def test_edit_expense_date_change_reorders_list(
 def test_edit_expense_no_optional_fields(dynamodb_table: DynamoDBClient) -> None:
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -341,7 +341,7 @@ def test_edit_expense_no_optional_fields(dynamodb_table: DynamoDBClient) -> None
 def test_edit_expense_no_items(dynamodb_table: DynamoDBClient) -> None:
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -363,7 +363,7 @@ def test_edit_expense_expense_num_too_low(
 
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": -1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -373,7 +373,7 @@ def test_edit_expense_expense_num_too_low(
 
     tool_output2 = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 0,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -400,7 +400,7 @@ def test_edit_expense_expense_num_too_high(
 
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 2,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -423,7 +423,7 @@ def test_edit_expense_invalid_category(
 
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -446,7 +446,7 @@ def test_edit_expense_zero_and_negative_amount(
 
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -456,7 +456,7 @@ def test_edit_expense_zero_and_negative_amount(
 
     tool_output2 = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -483,7 +483,7 @@ def test_edit_expense_non_numeric_amount(
 
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -506,7 +506,7 @@ def test_edit_expense_invalid_date_format(
 
     tool_output = expenses.edit_expense.invoke(
         {
-            "telegram_user_id": TELEGRAM_USER_ID,
+            "ledger_id": TELEGRAM_USER_ID,
             "expense_num": 1,
             "edit_message": "Unit test",
             "summary": "Unit test",
@@ -526,7 +526,7 @@ def test_delete_expense_deletes_single_item(
     dynamodb.put_item({"PK": pk, "SK": sk, **base_expense})
 
     tool_output = expenses.delete_expense.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID, "expense_num": 1}
+        {"ledger_id": TELEGRAM_USER_ID, "expense_num": 1}
     )
 
     assert tool_output == "Expense deleted."
@@ -545,7 +545,7 @@ def test_delete_expense_deletes_correct_item_when_multiple_exist(
     dynamodb.put_item(item2)
 
     tool_output = expenses.delete_expense.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID, "expense_num": 1}
+        {"ledger_id": TELEGRAM_USER_ID, "expense_num": 1}
     )
 
     assert tool_output == "Expense deleted."
@@ -556,7 +556,7 @@ def test_delete_expense_deletes_correct_item_when_multiple_exist(
 
 def test_delete_expense_returns_error_when_expense_num_is_zero() -> None:
     tool_output = expenses.delete_expense.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID, "expense_num": 0}
+        {"ledger_id": TELEGRAM_USER_ID, "expense_num": 0}
     )
 
     assert (
@@ -573,7 +573,7 @@ def test_delete_expense_returns_error_when_expense_num_exceeds_list(
     )
 
     tool_output = expenses.delete_expense.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID, "expense_num": 2}
+        {"ledger_id": TELEGRAM_USER_ID, "expense_num": 2}
     )
 
     assert (
@@ -586,7 +586,7 @@ def test_delete_expense_returns_error_when_no_expenses_exist(
     dynamodb_table: DynamoDBClient,
 ) -> None:
     tool_output = expenses.delete_expense.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID, "expense_num": 1}
+        {"ledger_id": TELEGRAM_USER_ID, "expense_num": 1}
     )
 
     assert (
@@ -596,9 +596,7 @@ def test_delete_expense_returns_error_when_no_expenses_exist(
 
 
 def test_get_all_expenses_no_expenses(dynamodb_table: DynamoDBClient) -> None:
-    tool_output = expenses.get_all_expenses.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID}
-    )
+    tool_output = expenses.get_all_expenses.invoke({"ledger_id": TELEGRAM_USER_ID})
     assert tool_output == "There are currently no expenses recorded."
 
 
@@ -616,9 +614,7 @@ def test_get_all_expenses_single_expense(
 
     expected_output = "summary | category | amount | date | payment_method"
     expected_output += "\n1. Breakfast at Yakun | Food | 6.13 SGD | 2023-12-20 | Cash"
-    tool_output = expenses.get_all_expenses.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID}
-    )
+    tool_output = expenses.get_all_expenses.invoke({"ledger_id": TELEGRAM_USER_ID})
 
     assert expected_output == tool_output
 
@@ -655,8 +651,6 @@ def test_get_all_expenses_multiple_expenses_ordered_by_insertion(
     )
     expected_output += "\n2. Breakfast at Yakun | Food | 6.13 SGD | 2023-12-20 | Cash"
 
-    tool_output = expenses.get_all_expenses.invoke(
-        {"telegram_user_id": TELEGRAM_USER_ID}
-    )
+    tool_output = expenses.get_all_expenses.invoke({"ledger_id": TELEGRAM_USER_ID})
 
     assert expected_output == tool_output

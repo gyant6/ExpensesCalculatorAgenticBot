@@ -23,7 +23,7 @@ def test_start_trip_creates_active_trip(dynamodb_table: DynamoDBClient) -> None:
     mock_datetime = datetime(2025, 12, 20)
     with patch("src.bot.tools.trip.datetime") as mock_dt:
         mock_dt.now.return_value = mock_datetime
-        tool_output = trip.start_trip.invoke({"telegram_user_id": TELEGRAM_USER_ID})
+        tool_output = trip.start_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
 
     pk = f"USER#{TELEGRAM_USER_ID}"
     sk = "TRIP#ACTIVE"
@@ -44,7 +44,7 @@ def test_start_trip_returns_error_when_trip_already_active(
         }
     )
 
-    tool_output = trip.start_trip.invoke({"telegram_user_id": TELEGRAM_USER_ID})
+    tool_output = trip.start_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
     assert tool_output == "There is already an active trip."
 
 
@@ -56,7 +56,7 @@ def test_end_trip_with_no_expenses(dynamodb_table: DynamoDBClient) -> None:
     pk = f"USER#{TELEGRAM_USER_ID}"
     dynamodb.put_item({"PK": pk, "SK": "TRIP#ACTIVE", "start_date": "2025-12-20"})
 
-    tool_output = trip.end_trip.invoke({"telegram_user_id": TELEGRAM_USER_ID})
+    tool_output = trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
     assert tool_output.startswith(trip.END_TRIP_SUCCESS)
     assert CSV_HEADER in tool_output
     assert trip.FX_UNAVAILABLE_NOTICE not in tool_output
@@ -75,7 +75,7 @@ def test_end_trip_deletes_all_expenses_and_returns_csv(
     dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
     dynamodb.put_item({"PK": pk, "SK": "EXPENSE#2", **base_expense})
 
-    tool_output = trip.end_trip.invoke({"telegram_user_id": TELEGRAM_USER_ID})
+    tool_output = trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
 
     assert tool_output.startswith(trip.END_TRIP_SUCCESS)
     assert CSV_HEADER in tool_output
@@ -99,7 +99,7 @@ def test_end_trip_still_exports_and_deletes_when_rates_unavailable(
     dynamodb.put_item({"PK": pk, "SK": "TRIP#ACTIVE", "start_date": "2025-12-20"})
     dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
 
-    tool_output = trip.end_trip.invoke({"telegram_user_id": TELEGRAM_USER_ID})
+    tool_output = trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
 
     assert trip.FX_UNAVAILABLE_NOTICE in tool_output
     assert CSV_HEADER in tool_output
@@ -111,5 +111,5 @@ def test_end_trip_still_exports_and_deletes_when_rates_unavailable(
 def test_end_trip_returns_error_when_no_active_trip(
     dynamodb_table: DynamoDBClient,
 ) -> None:
-    tool_output = trip.end_trip.invoke({"telegram_user_id": TELEGRAM_USER_ID})
+    tool_output = trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
     assert tool_output == trip.NO_ACTIVE_TRIP

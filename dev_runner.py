@@ -77,7 +77,7 @@ def run(user_id: str) -> None:
             result = graph.invoke(
                 {
                     "messages": [HumanMessage(content=user_input)],
-                    "telegram_user_id": user_id,
+                    "ledger_id": user_id,
                     "message_date": message_date,
                 },
                 config,

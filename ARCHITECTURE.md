@@ -305,8 +305,9 @@ from langgraph.graph import MessagesState
 class AgentState(MessagesState):
     # MessagesState provides: messages: list[BaseMessage]
     # thread_id is managed by the checkpointer config, not state
-    telegram_user_id: str       # Set by telegram_handler.py on every invocation; injected into
-                                # tools via InjectedState so the LLM never sees or supplies it
+    ledger_id: str              # Whose expenses these are — the chat, not the sender. Set by
+                                # telegram_handler.py on every invocation; injected into tools
+                                # via InjectedState so the LLM never sees or supplies it
     message_date: str           # YYYY-MM-DD date of the incoming Telegram message; set by
                                 # telegram_handler.py; used by add_expense as fallback date when
                                 # the user does not explicitly mention one
@@ -323,6 +324,34 @@ class AgentState(MessagesState):
 
 ---
 
+## Ledger Scope
+
+A **ledger** is the thing expenses belong to. In a private chat that is the user; in a
+group it is the group, so everyone contributes to one trip and sees one list. Telegram
+gives a private chat the same ID as its user, so `ledger_id` is just the chat ID in both
+cases and `_ledger_id_for` needs no branch.
+
+This matches the auth model, which already approves a group as a single entity — a member
+messaging through an approved group has no `AUTH#` record of their own. Storage originally
+disagreed: it keyed on the sender, so each member of a group got a private trip inside a
+shared conversation and neither could see the other's expenses. Authorisation said "this
+group is one thing"; storage said "these people are separate". They now agree.
+
+Consequences worth knowing:
+
+- The same person has **two independent ledgers** — their private chat and each group they
+  use the bot in. That is intended; a personal trip is not a group trip.
+- The checkpoint `thread_id` is the ledger too, so a group shares one conversation. "Show
+  my expenses" from any member sees the same list, and context carries across members.
+- Expenses currently record **no author**. In a shared ledger "who added the carrot" is a
+  real question the data cannot answer, since `source_message` keeps the text but not who
+  wrote it. Worth adding before using a group ledger to split costs.
+- The DynamoDB partition key is still `USER#<ledger_id>`, which reads oddly for a group.
+  Renaming the prefix would be a data migration, so it is a deliberate deferral rather
+  than an oversight.
+
+---
+
 ## DynamoDB Table Design (Single-Table)
 
 **Table name:** `ExpensesCalculator` (configurable via `DYNAMODB_TABLE_NAME`)
@@ -331,8 +360,8 @@ class AgentState(MessagesState):
 
 | PK | SK | Attributes | Description |
 |---|---|---|---|
-| `USER#<telegram_user_id>` | `TRIP#ACTIVE` | `start_date` | Active trip marker |
-| `USER#<telegram_user_id>` | `EXPENSE#<datetime>` | see below | Individual expense |
+| `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date` | Active trip marker |
+| `USER#<ledger_id>` | `EXPENSE#<datetime>` | see below | Individual expense |
 | `AUTH#<id>` | `PROFILE` | `status`, `entity_type`, `username`, `requested_at`, `reviewed_at` | Access control record (user or group) |
 
 `<id>` is the Telegram user ID (positive) or group ID (negative). `entity_type` is `USER` or `GROUP`. `status` is `PENDING`, `APPROVED`, or `REJECTED`.
@@ -487,7 +516,8 @@ cheerful 200, and every reply dies with `telegram.error.InvalidToken: Unauthoriz
 4. **Re-register the webhook.** The webhook secret is independent of the bot token, so
    reuse the stored one rather than generating a new one:
    ```bash
-   TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' .env | cut -d= -f2- | tr -d '')
+   TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' .env | cut -d= -f2- | tr -d '
+')
    SECRET=$(MSYS_NO_PATHCONV=1 aws ssm get-parameter      --name /ExpensesCalculatorAgenticBot/webhook-secret --with-decryption      --query Parameter.Value --output text --profile personal --region ap-southeast-1)
    URL=$(cd terraform && terraform output -raw webhook_url)
    curl -sS "https://api.telegram.org/bot$TOKEN/setWebhook"      -d "url=$URL" -d "secret_token=$SECRET" -d "drop_pending_updates=true"
