@@ -332,9 +332,16 @@ delivers every group message, not only those mentioning it. That is what allows 
 also means a conversation between two members would otherwise reach the model, costing a
 Bedrock call and sometimes drawing an unwanted reply.
 
-`_addressed_to_someone_else` drops a group message that mentions somebody but never the
-bot. It runs before the auth gate, so an ignored message costs neither a DynamoDB read nor
-an access request.
+`_addressed_to_someone_else` drops a message that mentions somebody but never the bot. It
+runs before the auth gate, so an ignored message costs neither a DynamoDB read nor an
+access request.
+
+**It applies in private chats too**, which is a deliberate trade rather than an oversight.
+In a group a mention is an address; in a DM it is more often descriptive — `lunch with
+@peilin $12` is an expense, not a message to Pei Lin — and that message is now dropped.
+Naming the bot anywhere overrides it, so `@ZuzuAssistantBot lunch with @peilin $12` is
+recorded. Restricting the filter to groups is a one-line change if the DM behaviour proves
+more annoying than useful.
 
 Two details that are easy to get wrong:
 

@@ -293,11 +293,15 @@ async def _check_auth(
 
 
 def _addressed_to_someone_else(message: Message, bot: Bot) -> bool:
-    """Check whether a group message tags people but not the bot.
+    """Check whether a message tags people but not the bot.
 
     Privacy mode is disabled so the bot receives every group message, including ones
     plainly aimed at another member. Those cost a Bedrock call and can draw a reply nobody
     asked for, so a message that mentions somebody other than the bot is left alone.
+
+    Applies in private chats too, where a mention is more often descriptive than an
+    address — the cost of that choice is that "lunch with @peilin $12" is ignored unless
+    the bot is named as well.
 
     Mentions are read from Telegram's own entities rather than by searching for "@", which
     would also match an email address, and the entity text is extracted with
@@ -305,7 +309,7 @@ def _addressed_to_someone_else(message: Message, bot: Bot) -> bool:
     string directly misplaces them as soon as the message contains an emoji.
 
     Args:
-        message: The incoming group message.
+        message: The incoming message.
         bot: The bot, for its username and ID.
 
     Returns:
@@ -351,14 +355,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = str(update.effective_user.id)
     chat = update.effective_chat
 
-    # Checked before the auth gate: a message aimed at another member is not this bot's
+    # Checked before the auth gate: a message aimed at somebody else is not this bot's
     # business, so it should cost neither a DynamoDB read nor an access request.
-    if (
-        chat
-        and chat.type in _GROUP_CHAT_TYPES
-        and _addressed_to_someone_else(update.message, context.bot)
-    ):
-        logger.info("Ignoring group message addressed to someone else")
+    #
+    # Applied in private chats as well as groups. That is a deliberate trade: in a DM a
+    # mention is usually descriptive rather than an address — "lunch with @peilin $12" is
+    # an expense, not a message to Pei Lin — and this drops it. Naming the bot anywhere in
+    # the message overrides that, so "@ZuzuAssistantBot lunch with @peilin $12" is still
+    # recorded.
+    if _addressed_to_someone_else(update.message, context.bot):
+        logger.info("Ignoring message addressed to someone else")
         return
 
     # The ledger is the chat, not the sender. In a group everyone contributes to one trip

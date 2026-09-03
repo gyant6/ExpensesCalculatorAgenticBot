@@ -1,8 +1,9 @@
-"""Tests for ignoring group messages aimed at other people.
+"""Tests for ignoring messages aimed at other people.
 
 Privacy mode is off, so the bot receives every group message and would otherwise send
 each one to the model — paying for a Bedrock call to answer a conversation between two
-other members.
+other members. The same rule is applied in private chats, which trades away descriptive
+mentions like "lunch with @peilin $12" unless the bot is named alongside.
 """
 
 from __future__ import annotations
@@ -133,3 +134,30 @@ def test_a_text_mention_of_the_bot_is_handled(bot: MagicMock) -> None:
     assert (
         _addressed_to_someone_else(_message("Zuzu lunch $12", entities), bot) is False
     )
+
+
+def test_naming_the_bot_rescues_a_descriptive_mention(bot: MagicMock) -> None:
+    # The escape hatch for the private-chat trade-off: a message that mentions another
+    # person is recorded as long as the bot is named too.
+    text = f"@{_BOT_NAME} lunch with @peilin $12"
+    entities = [
+        MessageEntity(type=MessageEntity.MENTION, offset=0, length=len(_BOT_NAME) + 1),
+        MessageEntity(
+            type=MessageEntity.MENTION, offset=text.index("@peilin"), length=7
+        ),
+    ]
+
+    assert _addressed_to_someone_else(_message(text, entities), bot) is False
+
+
+def test_a_descriptive_mention_without_the_bot_is_dropped(bot: MagicMock) -> None:
+    # The cost of applying this in private chats, pinned so the trade-off is explicit
+    # rather than discovered.
+    text = "lunch with @peilin $12"
+    entities = [
+        MessageEntity(
+            type=MessageEntity.MENTION, offset=text.index("@peilin"), length=7
+        )
+    ]
+
+    assert _addressed_to_someone_else(_message(text, entities), bot)
