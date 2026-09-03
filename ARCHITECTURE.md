@@ -834,8 +834,9 @@ to a REST API later means replacing the gateway and re-running `setWebhook`.
   and reach the `/auth` commands. Stored in SSM under the same placeholder-and-ignore
   pattern as the other secrets; compared with `hmac.compare_digest`; **fails closed** —
   an unconfigured secret rejects every delivery rather than accepting them all
-- [ ] Register webhook URL with Telegram (`setWebhook`)
-- [ ] End-to-end test via Telegram
+- [x] Register webhook URL with Telegram (`setWebhook`) with `secret_token` and `drop_pending_updates`
+- [x] End-to-end test via Telegram: approval flow, trip start, expense, trip end with both charts and the CSV — the first production exercise of Bedrock through the inference-profile ARN and of the bot → chart-Lambda invoke, both of which worked. A forged `POST /webhook` naming the admin's Telegram ID and carrying `/auth list` was rejected with HTTP 403
+- [x] Grant `dynamodb:BatchWriteItem` and `dynamodb:BatchGetItem`. Found only in production: the checkpointer batches its reads and deletes rather than issuing one call per item, so `DeleteItem` did not cover `clear_thread_history`, which failed with `AccessDeniedException` and left 114 checkpoint items behind. Nothing surfaced to the user because that failure is deliberately swallowed — the summary and attachments are already delivered by then — which is correct behaviour but means the only signal was a CloudWatch line. Local runs could not have caught it: DynamoDB Local enforces no IAM
 
 #### Step 6 — Security hardening
 - [ ] Webhook secret token: set `secret_token` at `setWebhook` registration; validate `X-Telegram-Bot-Api-Secret-Token` header in handler before processing
