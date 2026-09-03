@@ -120,7 +120,15 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
           "dynamodb:DeleteItem",
           "dynamodb:Query",
           "dynamodb:Scan",
-          "dynamodb:TransactWriteItems"
+          "dynamodb:TransactWriteItems",
+          # The checkpointer batches its reads and deletes rather than issuing one call
+          # per item, so DeleteItem alone does not cover clear_thread_history. Without
+          # these it fails with AccessDeniedException, and because that failure is
+          # deliberately swallowed — the user already has their summary by then — an
+          # ended trip's history silently survives and is replayed to Bedrock on every
+          # later message.
+          "dynamodb:BatchWriteItem",
+          "dynamodb:BatchGetItem"
         ]
         Resource = aws_dynamodb_table.expenses.arn
       },
