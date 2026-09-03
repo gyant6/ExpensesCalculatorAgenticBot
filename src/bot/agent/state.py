@@ -6,6 +6,6 @@ from langgraph.graph import MessagesState
 
 
 class AgentState(MessagesState):
-    telegram_user_id: str
+    ledger_id: str
     message_date: str
     trip_start_date: NotRequired[str | None]

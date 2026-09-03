@@ -32,7 +32,7 @@ def check_trip_status(state: AgentState) -> dict[str, Any]:
     """Read the user's active trip from DynamoDB and write trip_start_date into agent state.
 
     Args:
-        state: Current agent state containing telegram_user_id.
+        state: Current agent state containing ledger_id.
 
     Returns:
         Partial state update with trip_start_date set to the trip's start date string
@@ -41,7 +41,7 @@ def check_trip_status(state: AgentState) -> dict[str, Any]:
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    item = get_item(f"USER#{state['telegram_user_id']}", "TRIP#ACTIVE")
+    item = get_item(f"USER#{state['ledger_id']}", "TRIP#ACTIVE")
     if not item:
         return {"trip_start_date": None}
     return {"trip_start_date": item["start_date"]}

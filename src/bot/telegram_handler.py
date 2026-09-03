@@ -76,6 +76,9 @@ _ENDING_TRIP_NOTICE = "Ending your trip and putting your summary together…"
 
 _CSV_FILENAME = "expenses.csv"
 
+# Chat types whose ledger is shared by everyone in the conversation.
+_GROUP_CHAT_TYPES = frozenset({"group", "supergroup"})
+
 # Shown when the graph completes with no text to send. The tools have usually already run
 # by this point, so the turn succeeded even though there is nothing to report — the
 # wording says that rather than implying a fault.
@@ -102,7 +105,7 @@ def _timed(timings: dict[str, int], phase: str) -> Iterator[None]:
 
 def _log_timings(
     turn: str,
-    telegram_user_id: str,
+    ledger_id: str,
     timings: dict[str, int],
     **context: int,
 ) -> None:
@@ -115,19 +118,41 @@ def _log_timings(
 
     Args:
         turn: Which handler produced the timings, e.g. "message".
-        telegram_user_id: The user the turn belongs to, for correlation.
+        ledger_id: The user the turn belongs to, for correlation.
         timings: Phase name to duration in milliseconds; each is suffixed `_ms`.
         **context: Counts or other non-duration fields, logged under their own names so
             they are not mistaken for milliseconds.
     """
     fields = [f"{phase}_ms={ms}" for phase, ms in timings.items()]
     fields += [f"{name}={value}" for name, value in context.items()]
-    logger.info("timing turn=%s user=%s %s", turn, telegram_user_id, " ".join(fields))
+    logger.info("timing turn=%s user=%s %s", turn, ledger_id, " ".join(fields))
 
 
-def _config(telegram_user_id: str) -> RunnableConfig:
+def _ledger_id_for(update: Update) -> str | None:
+    """Return the ledger a message or callback belongs to.
+
+    A group's expenses belong to the group, not to whichever member typed them: everyone
+    contributes to one trip and sees one list. A private chat's ledger is the user. This
+    is also the identity the auth gate approves, so authorisation and storage cannot
+    disagree about who owns a trip.
+
+    Args:
+        update: The incoming update, from either handler.
+
+    Returns:
+        The ledger ID, or None if the update carries no chat to scope by.
+    """
+    chat = update.effective_chat
+    if chat is None:
+        return None
+    # Telegram gives a private chat the same ID as the user it belongs to, so the chat ID
+    # is the ledger in both cases — one expression, no branch to keep in step.
+    return str(chat.id)
+
+
+def _config(ledger_id: str) -> RunnableConfig:
     """Build the graph config that scopes checkpointed state to one Telegram user."""
-    return {"configurable": {"thread_id": telegram_user_id}}
+    return {"configurable": {"thread_id": ledger_id}}
 
 
 def _parse_mode(text: str) -> str | None:
@@ -157,7 +182,7 @@ def _extract_text(content: str | list[Any]) -> str:
     return "\n".join(texts)
 
 
-def _log_empty_reply(telegram_user_id: str, message: Any) -> None:
+def _log_empty_reply(ledger_id: str, message: Any) -> None:
     """Record the shape of a final message that yielded no text.
 
     Seen once in production: the tool ran and the expense was stored, but the turn ended
@@ -169,7 +194,7 @@ def _log_empty_reply(telegram_user_id: str, message: Any) -> None:
     hold the user's expense text.
 
     Args:
-        telegram_user_id: The user whose turn produced no text, for correlation.
+        ledger_id: The user whose turn produced no text, for correlation.
         message: The final message from the graph, whatever type it turned out to be.
     """
     content = getattr(message, "content", None)
@@ -182,7 +207,7 @@ def _log_empty_reply(telegram_user_id: str, message: Any) -> None:
         shape = type(content).__name__
     logger.warning(
         "Empty reply for user %s: message=%s blocks=%s tool_calls=%s",
-        telegram_user_id,
+        ledger_id,
         type(message).__name__,
         shape,
         len(getattr(message, "tool_calls", []) or []),
@@ -286,12 +311,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = str(update.effective_user.id)
     chat = update.effective_chat
 
-    if chat and chat.type in ("group", "supergroup"):
-        auth_id = str(chat.id)
+    # The ledger is the chat, not the sender. In a group everyone contributes to one trip
+    # and sees one expense list, which is the point of adding the bot to a group at all —
+    # scoping by sender gave each member a private trip inside a shared conversation, so
+    # one person's expenses were invisible to everyone else. It also matches the auth
+    # model, which already approves a group as a single entity rather than per member.
+    if chat and chat.type in _GROUP_CHAT_TYPES:
+        ledger_id = str(chat.id)
         entity_type = EntityType.GROUP
-        display_name = chat.title or auth_id
+        display_name = chat.title or ledger_id
     else:
-        auth_id = user_id
+        ledger_id = user_id
         entity_type = EntityType.USER
         raw_username = update.effective_user.username
         display_name = (
@@ -304,13 +334,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     with _timed(timings, "auth"):
         authorised = await _check_auth(
-            update, context, auth_id, entity_type, display_name
+            update, context, ledger_id, entity_type, display_name
         )
     if not authorised:
         return
 
     message_date = update.message.date.strftime("%Y-%m-%d")
-    config = _config(user_id)
+    config = _config(ledger_id)
 
     with _timed(timings, "state"):
         state = await asyncio.to_thread(_graph.get_state, config)
@@ -328,7 +358,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             _graph.invoke,
             {
                 "messages": [HumanMessage(content=update.message.text)],
-                "telegram_user_id": user_id,
+                "ledger_id": ledger_id,
                 "message_date": message_date,
             },
             config,
@@ -359,11 +389,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             last_msg = result["messages"][-1]
             content = _extract_text(last_msg.content)
             if not content:
-                _log_empty_reply(user_id, last_msg)
+                _log_empty_reply(ledger_id, last_msg)
                 content = _EMPTY_REPLY_FALLBACK
             await update.message.reply_text(content, parse_mode=_parse_mode(content))
 
-    _log_timings("message", user_id, timings)
+    _log_timings("message", ledger_id, timings)
 
 
 async def _acknowledge_callback(query: CallbackQuery) -> None:
@@ -426,7 +456,7 @@ async def _claim_confirmation(query: CallbackQuery) -> bool:
 
 
 def _render_attachments(
-    expenses: list[dict[str, Any]], telegram_user_id: str
+    expenses: list[dict[str, Any]], ledger_id: str
 ) -> tuple[bytes | None, bytes | None, bytes | None]:
     """Render the trip's chart images and CSV file from live expense data.
 
@@ -440,7 +470,7 @@ def _render_attachments(
 
     Args:
         expenses: Expense items for the trip, as returned by query_by_prefix.
-        telegram_user_id: Used only to correlate log records.
+        ledger_id: Used only to correlate log records.
 
     Returns:
         Tuple of (pie_chart_png, bar_chart_png, csv_bytes). Any element is None when that
@@ -456,13 +486,13 @@ def _render_attachments(
     except (httpx.HTTPError, RuntimeError, ValidationError):
         logger.exception(
             "FX rate fetch failed for user %s; sending CSV without SGD column",
-            telegram_user_id,
+            ledger_id,
         )
 
     try:
         csv_bytes: bytes | None = generate_csv(expenses, fx_rates)
     except Exception:
-        logger.exception("CSV generation failed for user %s", telegram_user_id)
+        logger.exception("CSV generation failed for user %s", ledger_id)
         csv_bytes = None
 
     pie_bytes: bytes | None = None
@@ -472,7 +502,7 @@ def _render_attachments(
         # a convenience, and the trip summary must go out regardless.
         charts = render_charts(expenses, fx_rates)
         if charts is None:
-            logger.warning("Charts unavailable for user %s", telegram_user_id)
+            logger.warning("Charts unavailable for user %s", ledger_id)
         else:
             pie_bytes, bar_bytes = charts
 
@@ -536,15 +566,17 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
 
     await _acknowledge_callback(query)
 
-    user_id = str(update.effective_user.id)
+    ledger_id = _ledger_id_for(update)
+    if ledger_id is None:
+        return
 
     # Claim before touching the graph, so a second tap cannot pass the state check below
     # and resume end_trip twice.
     if not await _claim_confirmation(query):
-        logger.info("Ignoring duplicate end_trip confirmation from user %s", user_id)
+        logger.info("Ignoring duplicate end_trip confirmation for ledger %s", ledger_id)
         return
 
-    config = _config(user_id)
+    config = _config(ledger_id)
 
     state = await asyncio.to_thread(_graph.get_state, config)
     if END_TRIP_NODE not in (state.next or ()):
@@ -563,12 +595,12 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         # the expenses, so reading them afterwards would silently produce empty charts.
         with _timed(timings, "query"):
             expenses = await asyncio.to_thread(
-                query_by_prefix, f"USER#{user_id}", "EXPENSE#"
+                query_by_prefix, f"USER#{ledger_id}", "EXPENSE#"
             )
         # FX fetch, CSV build and chart render together, since they share one call.
         with _timed(timings, "attachments"):
             pie_bytes, bar_bytes, csv_bytes = await asyncio.to_thread(
-                _render_attachments, expenses, user_id
+                _render_attachments, expenses, ledger_id
             )
 
         with _timed(timings, "graph"):
@@ -582,9 +614,9 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         # Only once the summary and files are delivered: this discards the history the
         # summary was written from, and the next trip starts with a clean thread.
         with _timed(timings, "clear"):
-            await asyncio.to_thread(clear_thread_history, _graph, user_id)
+            await asyncio.to_thread(clear_thread_history, _graph, ledger_id)
 
-        _log_timings("end_trip", user_id, timings, expenses=len(expenses))
+        _log_timings("end_trip", ledger_id, timings, expenses=len(expenses))
     else:
         last_ai = state.values["messages"][-1]
         tool_call_id = last_ai.tool_calls[0]["id"]

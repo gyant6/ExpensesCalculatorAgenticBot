@@ -42,7 +42,7 @@ def check_valid_amount(amount: str) -> bool:
 
 @tool
 def add_expense(
-    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    ledger_id: Annotated[str, InjectedState("ledger_id")],
     message_date: Annotated[str, InjectedState("message_date")],
     source_message: str,
     summary: str,
@@ -96,7 +96,7 @@ def add_expense(
     datetime_now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     dynamodb.put_item(
         {
-            "PK": f"USER#{telegram_user_id}",
+            "PK": f"USER#{ledger_id}",
             "SK": f"EXPENSE#{datetime_now}",
             "source_message": source_message,
             "summary": summary,
@@ -114,7 +114,7 @@ def add_expense(
 
 @tool
 def edit_expense(
-    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    ledger_id: Annotated[str, InjectedState("ledger_id")],
     expense_num: int,
     edit_message: str,
     summary: str,
@@ -192,7 +192,7 @@ def edit_expense(
     if payment_method:
         edited_fields["payment_method"] = payment_method
 
-    items = dynamodb.query_by_prefix(f"USER#{telegram_user_id}", "EXPENSE#")
+    items = dynamodb.query_by_prefix(f"USER#{ledger_id}", "EXPENSE#")
     if not items:
         return "There are no items to edit. Add an expense to be tracked first."
     if expense_num > len(items):
@@ -235,7 +235,7 @@ def edit_expense(
 
 @tool
 def delete_expense(
-    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    ledger_id: Annotated[str, InjectedState("ledger_id")],
     expense_num: int,
 ) -> str:
     """Delete an existing expense by its list position.
@@ -259,7 +259,7 @@ def delete_expense(
     if expense_num < 1:
         return invalid_expense_str
 
-    pk = f"USER#{telegram_user_id}"
+    pk = f"USER#{ledger_id}"
     items = dynamodb.query_by_prefix(pk, "EXPENSE#")
     if not items:
         return "There are no items to delete. Add an expense to be tracked first."
@@ -273,7 +273,7 @@ def delete_expense(
 
 @tool
 def get_all_expenses(
-    telegram_user_id: Annotated[str, InjectedState("telegram_user_id")],
+    ledger_id: Annotated[str, InjectedState("ledger_id")],
 ) -> str:
     """Retrieve all recorded expenses for the user.
 
@@ -288,7 +288,7 @@ def get_all_expenses(
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    items = dynamodb.query_by_prefix(f"USER#{telegram_user_id}", "EXPENSE#")
+    items = dynamodb.query_by_prefix(f"USER#{ledger_id}", "EXPENSE#")
 
     if not items:
         return "There are currently no expenses recorded."
