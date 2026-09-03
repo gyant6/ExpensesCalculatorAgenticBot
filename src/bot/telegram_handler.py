@@ -15,10 +15,12 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 from telegram import (
+    Bot,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    MessageEntity,
     Update,
 )
 from telegram.error import BadRequest
@@ -290,6 +292,44 @@ async def _check_auth(
     return False
 
 
+def _addressed_to_someone_else(message: Message, bot: Bot) -> bool:
+    """Check whether a group message tags people but not the bot.
+
+    Privacy mode is disabled so the bot receives every group message, including ones
+    plainly aimed at another member. Those cost a Bedrock call and can draw a reply nobody
+    asked for, so a message that mentions somebody other than the bot is left alone.
+
+    Mentions are read from Telegram's own entities rather than by searching for "@", which
+    would also match an email address, and the entity text is extracted with
+    `parse_entity` because Telegram counts offsets in UTF-16 code units — slicing the
+    string directly misplaces them as soon as the message contains an emoji.
+
+    Args:
+        message: The incoming group message.
+        bot: The bot, for its username and ID.
+
+    Returns:
+        True if the message mentions at least one other party and never the bot. False if
+        it mentions nobody, or if the bot is among those mentioned — being addressed
+        alongside others is still being addressed.
+    """
+    mentions_someone_else = False
+    for entity in message.entities:
+        if entity.type == MessageEntity.MENTION:
+            if (
+                message.parse_entity(entity).lstrip("@").casefold()
+                == (bot.username or "").casefold()
+            ):
+                return False
+            mentions_someone_else = True
+        elif entity.type == MessageEntity.TEXT_MENTION:
+            # A user with no username; Telegram attaches the user object instead.
+            if entity.user is not None and entity.user.id == bot.id:
+                return False
+            mentions_someone_else = True
+    return mentions_someone_else
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process an incoming Telegram text message through the agent graph.
 
@@ -310,6 +350,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user_id = str(update.effective_user.id)
     chat = update.effective_chat
+
+    # Checked before the auth gate: a message aimed at another member is not this bot's
+    # business, so it should cost neither a DynamoDB read nor an access request.
+    if (
+        chat
+        and chat.type in _GROUP_CHAT_TYPES
+        and _addressed_to_someone_else(update.message, context.bot)
+    ):
+        logger.info("Ignoring group message addressed to someone else")
+        return
 
     # The ledger is the chat, not the sender. In a group everyone contributes to one trip
     # and sees one expense list, which is the point of adding the bot to a group at all —
