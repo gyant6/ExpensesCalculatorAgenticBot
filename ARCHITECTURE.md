@@ -801,12 +801,19 @@ Constraints worth recording:
 - The chart function is a pure function of its input — expenses and FX rates in, PNG bytes out. It reads no database and holds no state, which is what makes it separable at all
 
 #### Step 4 — Build and deploy
-- [ ] Build both archives: `uv run python scripts/build_lambda.py`
-- [ ] Deploy: `terraform apply`
-- [ ] Set real SSM values: `aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --value "<token>" --type SecureString --overwrite --region ap-southeast-1` (and same for admin-telegram-id)
-- [ ] Push code for both functions: `aws lambda update-function-code --function-name <name> --zip-file fileb://<archive>`
-- [ ] Smoke-test: invoke the main Lambda directly with a synthetic payload via `aws lambda invoke`
-- [ ] Record `Init Duration` from the CloudWatch log for a cold start, so the cold-start cost of the split is measured rather than assumed
+- [x] Build both archives: `uv run python scripts/build_lambda.py`
+- [x] Deploy: `terraform apply` — 11 resources created, 0 changed, 0 destroyed
+- [x] Set real SSM values: `aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --value "<token>" --type SecureString --overwrite --region ap-southeast-1` (and same for admin-telegram-id). **Run these from cmd, not Git Bash** — MSYS rewrites the leading `/` of the parameter name into a Windows path, and on a write that silently creates a parameter under the mangled name while the real one keeps its placeholder. Prefix with `MSYS_NO_PATHCONV=1` if you must use Git Bash
+- [x] Push code for both functions: `aws lambda update-function-code --function-name <name> --zip-file fileb://<archive>` — not needed for the first deploy, since Terraform uploads both archives when it creates the functions; this is the path for every deploy after it
+- [x] Smoke-test: both functions invoked directly. The bot returned `{"statusCode": 200}` with no `FunctionError`, proving the Linux wheels import, the SSM secrets resolve and PTB initialises. The chart function returned two valid PNGs (30 KB and 26 KB) from a representative payload — the first real execution of `chart_handler`, of matplotlib on Linux, and of the base64 round trip
+- [x] Record `Init Duration` from the CloudWatch log for a cold start, so the cold-start cost of the split is measured rather than assumed:
+
+| Function | Init | Duration | Max memory |
+|---|---:|---:|---:|
+| bot | 4366 ms | 1343 ms | 202 MB / 1024 |
+| charts | 2431 ms | 534 ms | 135 MB / 1024 |
+
+The bot's 4.4 s init is what an ordinary message pays after an idle period, and it is now free of matplotlib, numpy, Pillow and fontTools. What it is *not* is a before-and-after: the pre-split artefact was never deployed, so the improvement remains reasoned rather than measured. Both functions use a fifth of their provisioned memory, but Lambda scales CPU with memory, so trimming it would slow the very cold start this measures — worth revisiting only with numbers behind it
 
 #### Step 5 — API Gateway + webhook
 - [ ] Terraform: HTTP API Gateway (POST /webhook → Lambda integration)
