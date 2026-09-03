@@ -55,6 +55,14 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
+# basicConfig does nothing at all — not even set the level — when the root logger already
+# has a handler, and the Lambda runtime attaches one before this module is imported. Under
+# polling the call above is what configures logging; in Lambda it is a no-op and this line
+# is the only thing that applies LOG_LEVEL. Without it the root logger stays at the
+# runtime's default of WARNING and every logger.info in the application is silently
+# dropped, including the per-turn timing line.
+logging.getLogger().setLevel(settings.LOG_LEVEL)
+
 for _handler in logging.getLogger().handlers:
     _handler.setFormatter(
         _RedactingFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
