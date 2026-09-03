@@ -465,6 +465,67 @@ Both photos are omitted if rendering fails, or if FX rates were unavailable — 
 
 ---
 
+## Runbook
+
+### Rotating the Telegram bot token
+
+Five steps, and the last two are the ones that bite. Skipping step 4 means nothing reaches
+the bot at all; skipping step 5 means messages arrive, the Lambda runs, the gateway logs a
+cheerful 200, and every reply dies with `telegram.error.InvalidToken: Unauthorized`.
+
+1. **Revoke and reissue in BotFather.** This also **clears the webhook registration** —
+   `getWebhookInfo` afterwards reports an empty `url`. The bot ID is unchanged, but the
+   delivery target is gone.
+2. **Update `.env`** for local polling.
+3. **Update the SSM parameter** so production gets the new value:
+   ```bash
+   aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token      --value "<new token>" --type SecureString --overwrite      --profile personal --region ap-southeast-1
+   ```
+   Run this from cmd, or prefix with `MSYS_NO_PATHCONV=1` in Git Bash — MSYS rewrites the
+   leading `/` of the parameter name into a Windows path, and on a write that silently
+   creates a parameter under the mangled name while the real one keeps its old value.
+4. **Re-register the webhook.** The webhook secret is independent of the bot token, so
+   reuse the stored one rather than generating a new one:
+   ```bash
+   TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' .env | cut -d= -f2- | tr -d '')
+   SECRET=$(MSYS_NO_PATHCONV=1 aws ssm get-parameter      --name /ExpensesCalculatorAgenticBot/webhook-secret --with-decryption      --query Parameter.Value --output text --profile personal --region ap-southeast-1)
+   URL=$(cd terraform && terraform output -raw webhook_url)
+   curl -sS "https://api.telegram.org/bot$TOKEN/setWebhook"      -d "url=$URL" -d "secret_token=$SECRET" -d "drop_pending_updates=true"
+   ```
+5. **Force a Lambda cold start.** `settings = Settings()` runs at module import and SSM is
+   read once per cold start, so warm containers keep serving the previous token until they
+   recycle. Re-pushing the code is the cleanest trigger — Terraform has `ignore_changes` on
+   `filename`, so it causes no drift:
+   ```bash
+   aws lambda update-function-code --function-name ExpensesCalculatorAgenticBot      --zip-file fileb://function.zip --profile personal --region ap-southeast-1
+   ```
+   Caching secrets at import is deliberate — fetching them per invocation would add SSM
+   latency and cost to every message — but it does mean any secret rotation needs a deploy
+   to take effect.
+
+Rotating the **webhook secret** is steps 3–5 with the `webhook-secret` parameter, and the
+same cold-start requirement applies for the same reason.
+
+### Diagnosing a silent bot
+
+Work outward from Telegram, since each layer fails differently:
+
+| Check | What it tells you |
+|---|---|
+| `getWebhookInfo` → empty `url` | Telegram has no delivery target; re-run `setWebhook` |
+| `getWebhookInfo` → `last_error_message` | Telegram reached the gateway and got an error back |
+| API Gateway access log, no entries | The delivery never arrived — DNS, registration, or Telegram-side |
+| Access log `status: 403` | The secret token did not match; the handler rejected it before processing |
+| Access log 200 but no reply in Telegram | The Lambda ran and failed after acknowledging — read its log |
+| Lambda log `InvalidToken: Unauthorized` | Warm container holding a stale token; force a cold start (step 5 above) |
+
+Everything the application logs below `ERROR` depends on the explicit `setLevel` in
+`main.py`: `logging.basicConfig` does nothing once the Lambda runtime has attached a
+handler, so without it the root logger sits at `WARNING` and every `logger.info` — the
+per-turn timing line included — is dropped in production while polling looks fine.
+
+---
+
 ## Environment Configuration
 
 ```bash
