@@ -28,3 +28,5 @@ requirements.txt
 terraform/.terraform/
 terraform/terraform.tfstate
 terraform/terraform.tfstate.backup
+# Local account ID and profile — see the note in terraform/terraform.tfvars.
+terraform/*.auto.tfvars

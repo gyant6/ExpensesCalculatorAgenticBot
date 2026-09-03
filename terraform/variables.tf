@@ -3,6 +3,26 @@ variable "aws_region" {
   type        = string
 }
 
+variable "aws_account_id" {
+  description = <<-EOT
+    The account these resources belong in. Compared against the credentials actually in
+    use, never interpolated into an ARN. Deliberately has no default and is not committed:
+    the value lives in the gitignored local.auto.tfvars, so a fresh clone fails asking for
+    it rather than quietly planning against whichever account happens to be default.
+  EOT
+  type        = string
+}
+
+variable "aws_profile" {
+  description = <<-EOT
+    Named AWS profile to authenticate with. Null uses the standard credential chain, which
+    is correct on a CI runner where no named profiles exist. Set locally in
+    local.auto.tfvars when the machine holds credentials for more than one account.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "dynamodb_table_name" {
   description = "DynamoDB table name. Must match DYNAMODB_TABLE_NAME in Lambda env."
   type        = string
