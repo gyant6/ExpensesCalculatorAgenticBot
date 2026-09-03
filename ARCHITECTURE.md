@@ -324,6 +324,33 @@ class AgentState(MessagesState):
 
 ---
 
+## Group Message Filtering
+
+Privacy mode is **disabled** on this bot (`can_read_all_group_messages: true`), so Telegram
+delivers every group message, not only those mentioning it. That is what allows a plain
+`12 dollars for lunch` to be recorded without anyone having to address the bot — but it
+also means a conversation between two members would otherwise reach the model, costing a
+Bedrock call and sometimes drawing an unwanted reply.
+
+`_addressed_to_someone_else` drops a group message that mentions somebody but never the
+bot. It runs before the auth gate, so an ignored message costs neither a DynamoDB read nor
+an access request.
+
+Two details that are easy to get wrong:
+
+- **Read Telegram's entities, not the text.** Searching for `@` also matches an email
+  address; Telegram classifies that as an `EMAIL` entity and a real tag as `MENTION` or —
+  for a user with no username — `TEXT_MENTION`, which carries the user object instead.
+- **Extract with `parse_entity`.** Telegram counts offsets in UTF-16 code units, so an
+  emoji occupies two while Python sees one. Slicing the string directly starts a character
+  late, and the bot reads its own name as somebody else's — meaning a message addressed to
+  it gets ignored. This surfaces only when the mention is of the bot, since misreading any
+  other name still yields the right answer by luck.
+
+Mentioning the bot alongside others is still addressing it, so those messages are handled.
+
+---
+
 ## Ledger Scope
 
 A **ledger** is the thing expenses belong to. In a private chat that is the user; in a
