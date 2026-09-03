@@ -23,6 +23,7 @@ PRODUCTION_ENVIRONMENT: Final = "production"
 _SSM_FIELDS: dict[str, str] = {
     "TELEGRAM_BOT_TOKEN_SSM_PATH": "TELEGRAM_BOT_TOKEN",
     "ADMIN_TELEGRAM_ID_SSM_PATH": "ADMIN_TELEGRAM_ID",
+    "WEBHOOK_SECRET_SSM_PATH": "WEBHOOK_SECRET",
 }
 
 
@@ -86,6 +87,9 @@ class Settings(BaseSettings):
     DYNAMODB_TABLE_NAME: str
     DYNAMODB_ENDPOINT_URL: str | None = None
     ADMIN_TELEGRAM_ID: int
+    # Shared secret Telegram echoes on every webhook delivery. Required in production;
+    # unset locally, where polling means there is no webhook to authenticate.
+    WEBHOOK_SECRET: str | None = None
     # Name of the Lambda that renders the trip charts. Required when
     # ENVIRONMENT=production; unused locally, where charts are rendered in-process
     # because matplotlib is installed in the dev environment but not in the main
