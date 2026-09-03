@@ -816,7 +816,24 @@ Constraints worth recording:
 The bot's 4.4 s init is what an ordinary message pays after an idle period, and it is now free of matplotlib, numpy, Pillow and fontTools. What it is *not* is a before-and-after: the pre-split artefact was never deployed, so the improvement remains reasoned rather than measured. Both functions use a fifth of their provisioned memory, but Lambda scales CPU with memory, so trimming it would slow the very cold start this measures — worth revisiting only with numbers behind it
 
 #### Step 5 — API Gateway + webhook
-- [ ] Terraform: HTTP API Gateway (POST /webhook → Lambda integration)
+
+An **HTTP API**, not a REST API. The two are not interchangeable here: resource policies —
+and therefore the IP allowlist in Step 6 — exist only on REST APIs, and AWS WAF does not
+support HTTP APIs either. Verified against the provider schema rather than assumed
+(`aws_apigatewayv2_api` has no `policy` attribute; `aws_api_gateway_rest_api` does). The
+control that actually authenticates a delivery is the secret token, which proves a request
+is Telegram's *and* that it is for this bot — something an IP allowlist cannot do. Moving
+to a REST API later means replacing the gateway and re-running `setWebhook`.
+
+- [x] Terraform: HTTP API Gateway (POST /webhook → Lambda integration), `$default` stage
+  with auto-deploy, JSON access logs to CloudWatch, and an `aws_lambda_permission` scoped
+  to this API's execution ARN so nothing else can invoke the bot on its behalf
+- [x] Webhook secret token, brought forward from Step 6 because it is what makes the
+  endpoint safe to expose at all: the gateway URL is not a credential, and without the
+  header anyone who learned it could POST a forged update naming the admin's Telegram ID
+  and reach the `/auth` commands. Stored in SSM under the same placeholder-and-ignore
+  pattern as the other secrets; compared with `hmac.compare_digest`; **fails closed** —
+  an unconfigured secret rejects every delivery rather than accepting them all
 - [ ] Register webhook URL with Telegram (`setWebhook`)
 - [ ] End-to-end test via Telegram
 

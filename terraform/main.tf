@@ -38,6 +38,7 @@ resource "aws_dynamodb_table" "expenses" {
 locals {
   ssm_telegram_bot_token_path = "/ExpensesCalculatorAgenticBot/telegram-bot-token"
   ssm_admin_telegram_id_path  = "/ExpensesCalculatorAgenticBot/admin-telegram-id"
+  ssm_webhook_secret_path     = "/ExpensesCalculatorAgenticBot/webhook-secret"
 
   # Named once here because each appears in the function, its log group, and the IAM
   # policy that scopes writes to that log group.
@@ -141,7 +142,8 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
         Action = ["ssm:GetParameters"]
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_telegram_bot_token_path}",
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_admin_telegram_id_path}"
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_admin_telegram_id_path}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_webhook_secret_path}"
         ]
       },
       {
@@ -224,6 +226,7 @@ resource "aws_lambda_function" "bot" {
       CHECKPOINT_TTL_SECONDS       = "7776000"
       TELEGRAM_BOT_TOKEN_SSM_PATH  = local.ssm_telegram_bot_token_path
       ADMIN_TELEGRAM_ID_SSM_PATH   = local.ssm_admin_telegram_id_path
+      WEBHOOK_SECRET_SSM_PATH      = local.ssm_webhook_secret_path
       CHART_LAMBDA_FUNCTION_NAME   = local.chart_function_name
       CHART_LAMBDA_TIMEOUT_SECONDS = tostring(var.chart_client_timeout)
     }

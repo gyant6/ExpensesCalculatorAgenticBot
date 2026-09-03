@@ -32,3 +32,8 @@ output "lambda_exec_role_arn" {
   description = "ARN of the Lambda execution IAM role."
   value       = aws_iam_role.lambda_exec.arn
 }
+
+output "webhook_url" {
+  description = "Register this with Telegram via setWebhook."
+  value       = "${aws_apigatewayv2_api.webhook.api_endpoint}/webhook"
+}

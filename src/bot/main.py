@@ -5,6 +5,7 @@ Production:         AWS Lambda calls `lambda_handler` directly via API Gateway w
 """
 
 import asyncio
+import hmac
 import json
 import logging
 from typing import Any
@@ -143,6 +144,44 @@ async def _handle_update(update_data: dict[str, Any]) -> None:
     await _lambda_app.process_update(update)
 
 
+# Header Telegram echoes on every delivery when a secret_token was given to setWebhook.
+# API Gateway lowercases header names in the payload-format-2.0 event.
+_SECRET_TOKEN_HEADER = "x-telegram-bot-api-secret-token"
+
+_FORBIDDEN = {"statusCode": 403, "body": "Forbidden"}
+_OK = {"statusCode": 200, "body": "OK"}
+
+
+def _is_authentic(event: dict[str, Any]) -> bool:
+    """Check that a webhook delivery carries the secret token agreed with Telegram.
+
+    The gateway URL is not a credential — anyone who learns it could otherwise POST a
+    forged update naming the admin's Telegram ID and reach the /auth commands through it.
+    This header is what makes a delivery provably Telegram's.
+
+    Args:
+        event: The API Gateway proxy event.
+
+    Returns:
+        True if the delivery carries the expected token. False if it is missing or wrong,
+        or if no secret is configured at all — an unconfigured secret rejects everything
+        rather than accepting everything, so a misdeploy fails closed.
+    """
+    expected = settings.WEBHOOK_SECRET
+    if not expected:
+        logger.error(
+            "WEBHOOK_SECRET is not configured; rejecting the delivery. Set the SSM "
+            "parameter and register the same value with setWebhook."
+        )
+        return False
+
+    headers = event.get("headers") or {}
+    presented = headers.get(_SECRET_TOKEN_HEADER)
+    # compare_digest rather than == so the comparison does not leak the token's length or
+    # its matching prefix through timing.
+    return presented is not None and hmac.compare_digest(presented, expected)
+
+
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """AWS Lambda entry point for production webhook mode.
 
@@ -160,6 +199,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     Returns:
         API Gateway response dict with statusCode 200.
     """
+    if not _is_authentic(event):
+        return _FORBIDDEN
+
     global _lambda_loop
     if _lambda_loop is None:
         _lambda_loop = asyncio.new_event_loop()
@@ -167,7 +209,7 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     body: dict[str, Any] = json.loads(event.get("body") or "{}")
     _lambda_loop.run_until_complete(_handle_update(body))
-    return {"statusCode": 200, "body": "OK"}
+    return _OK
 
 
 # ── Polling (local development) ────────────────────────────────────────────────
