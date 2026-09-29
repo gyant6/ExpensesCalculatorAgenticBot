@@ -590,6 +590,66 @@ per-turn timing line included — is dropped in production while polling looks f
 
 ---
 
+### Recovering Terraform state
+
+The Terraform state file (`terraform.tfstate`) is gitignored and local. If it is lost,
+Terraform has no record of the deployed resources and will plan to create all 18 from
+scratch — which would conflict with what already exists in AWS. The fix is to import
+each resource into a fresh local state (or into an S3 backend if that migration has
+been done).
+
+Run these from the `terraform/` directory after `terraform init`. Each command is
+idempotent — rerun it safely if a previous attempt failed partway through.
+
+```bash
+# DynamoDB
+terraform import aws_dynamodb_table.expenses ExpensesCalculator
+
+# SSM Parameters
+terraform import aws_ssm_parameter.telegram_bot_token /ExpensesCalculatorAgenticBot/telegram-bot-token
+terraform import aws_ssm_parameter.admin_telegram_id  /ExpensesCalculatorAgenticBot/admin-telegram-id
+terraform import aws_ssm_parameter.webhook_secret     /ExpensesCalculatorAgenticBot/webhook-secret
+
+# IAM
+terraform import aws_iam_role.lambda_exec               ExpensesCalculatorAgenticBot-lambda-exec
+terraform import aws_iam_role_policy.lambda_exec_policy ExpensesCalculatorAgenticBot-lambda-exec:ExpensesCalculatorAgenticBot-lambda-exec-policy
+terraform import aws_iam_role.chart_lambda_exec               ExpensesCalculatorAgenticBot-chart-lambda-exec
+terraform import aws_iam_role_policy.chart_lambda_exec_policy ExpensesCalculatorAgenticBot-chart-lambda-exec:ExpensesCalculatorAgenticBot-chart-lambda-exec-policy
+
+# Lambda functions
+terraform import aws_lambda_function.bot    ExpensesCalculatorAgenticBot
+terraform import aws_lambda_function.charts ExpensesCalculatorAgenticBot-charts
+
+# Lambda permission (API Gateway → bot function)
+terraform import aws_lambda_permission.webhook ExpensesCalculatorAgenticBot/AllowExecutionFromAPIGateway
+
+# CloudWatch log groups
+terraform import aws_cloudwatch_log_group.bot     /aws/lambda/ExpensesCalculatorAgenticBot
+terraform import aws_cloudwatch_log_group.charts  /aws/lambda/ExpensesCalculatorAgenticBot-charts
+terraform import aws_cloudwatch_log_group.webhook /aws/apigateway/ExpensesCalculatorAgenticBot-webhook
+
+# API Gateway — the IDs are account-specific; look them up first if they have changed:
+#   aws apigatewayv2 get-apis --region ap-southeast-1 --query "Items[?Name=='ExpensesCalculatorAgenticBot-webhook']"
+#   aws apigatewayv2 get-integrations --api-id <API_ID> --region ap-southeast-1
+#   aws apigatewayv2 get-routes       --api-id <API_ID> --region ap-southeast-1
+#
+# At the time of the original deploy these were:
+#   API_ID:           s90cd2my3e
+#   Integration ID:   3qivice
+#   Route ID:         uw865gh
+terraform import aws_apigatewayv2_api.webhook         s90cd2my3e
+terraform import aws_apigatewayv2_integration.webhook s90cd2my3e/3qivice
+terraform import aws_apigatewayv2_route.webhook       s90cd2my3e/uw865gh
+terraform import aws_apigatewayv2_stage.webhook       s90cd2my3e/$default
+```
+
+After all imports complete, run `terraform plan` — it should show 0 changes if every
+resource was imported and the config matches what is deployed. Any diff indicates a
+config drift (e.g. the 60-day CloudWatch retention applied via CLI after the state was
+lost). Fix drifts by running `terraform apply` on those resources only.
+
+---
+
 ## Environment Configuration
 
 ```bash
@@ -966,7 +1026,7 @@ to a REST API later means replacing the gateway and re-running `setWebhook`.
 - [x] Set the root logger level explicitly rather than relying on `logging.basicConfig`. Found in production: `basicConfig` does nothing — not even set the level — when the root logger already has a handler, and the Lambda runtime attaches one before this module imports. `LOG_LEVEL` was therefore never applied, the root logger sat at the runtime's `WARNING` default, and every `logger.info` in the application was silently dropped in production: the per-turn timing line, the duplicate-tap and expired-query messages, the charts-unavailable warning. `ERROR` came through, which is why the DynamoDB `AccessDeniedException` was visible at all. Polling was unaffected, since there no handler exists yet and `basicConfig` works normally — so this could only ever have shown up in Lambda
 
 #### Step 6 — Security hardening
-- [ ] Webhook secret token: set `secret_token` at `setWebhook` registration; validate `X-Telegram-Bot-Api-Secret-Token` header in handler before processing
+- [x] Webhook secret token: set `secret_token` at `setWebhook` registration; validate `X-Telegram-Bot-Api-Secret-Token` header in handler before processing (done in Step 5 — brought forward because the endpoint was exposed before this step)
 - [ ] API Gateway resource policy: IP allowlist from Telegram's published CIDR ranges ([cidr.txt](https://core.telegram.org/resources/cidr.txt))
 - [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps IP allowlist in sync with Telegram's published ranges)
 - [ ] IAM role for CIDR updater scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
@@ -975,6 +1035,30 @@ to a REST API later means replacing the gateway and re-running `setWebhook`.
 #### Step 7 — Bedrock Guardrails
 - [ ] Denied topics policy: block off-topic requests (financial advice, general chat) and keep the agent scoped to expense tracking
 - [ ] Prompt attack filter: detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
+
+#### Step 8 — Terraform state in S3
+- [ ] Migrate Terraform state to an S3 backend with DynamoDB locking. The state file is currently local and gitignored — losing the machine that ran `terraform apply` loses the state, and any config change must then either use the AWS CLI directly or re-import all 18 resources. An S3 backend removes both constraints: the state is durable, CI/CD can read it, and a fresh clone just runs `terraform init`.
+
+  Steps:
+  1. Create the state bucket and lock table:
+     ```bash
+     aws s3api create-bucket --bucket expenses-bot-tfstate-<account-id> --region ap-southeast-1 --create-bucket-configuration LocationConstraint=ap-southeast-1
+     aws s3api put-bucket-versioning --bucket expenses-bot-tfstate-<account-id> --versioning-configuration Status=Enabled
+     aws dynamodb create-table --table-name expenses-bot-tfstate-lock --attribute-definitions AttributeName=LockID,AttributeType=S --key-schema AttributeName=LockID,KeyType=HASH --billing-mode PAY_PER_REQUEST --region ap-southeast-1
+     ```
+  2. Add a `backend "s3"` block to `providers.tf`:
+     ```hcl
+     terraform {
+       backend "s3" {
+         bucket         = "expenses-bot-tfstate-<account-id>"
+         key            = "terraform.tfstate"
+         region         = "ap-southeast-1"
+         dynamodb_table = "expenses-bot-tfstate-lock"
+         encrypt        = true
+       }
+     }
+     ```
+  3. Migrate existing local state (if it exists) or import all resources from scratch (see **Recovering Terraform state** in the Runbook).
 
 ---
 
