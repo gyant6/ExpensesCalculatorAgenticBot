@@ -1151,19 +1151,40 @@ uv run pre-commit run --all-files
 
 ### Phase 4 — Shared-ledger correctness (future)
 
-Consequences of scoping the ledger to the chat rather than the sender. None of these
-existed while every member had a private trip, and none is urgent for a couple of people
-being careful — but each is a silent failure rather than a loud one, so they are recorded
-before anyone relies on a group for a real trip.
+Consequences of scoping the ledger to the chat rather than the sender — plus one defect
+that predates the change and which the group scope merely made easy to hit. None is urgent
+for a couple of people being careful, but each is a silent failure rather than a loud one,
+so they are recorded before anyone relies on a group for a real trip.
 
-- [ ] **Positional commands are a race between members.** `edit_expense` and
-  `delete_expense` take a 1-based index from `get_all_expenses`, which is stable for one
-  user and not for two: A lists and sees yogurt at #1, B deletes an earlier item, the
-  positions shift, and A's "delete 1" removes something else. It deletes the wrong expense
-  rather than failing, which is the worst shape for a bug. Nearly observed in the first
-  group test, where both members happened to refer to expenses by name. Matching on
-  summary — which is how people phrase it anyway — removes the window; positions could
-  stay as a fallback for genuine ambiguity
+- [ ] **Expenses are addressed by list position, which is not stable.** `edit_expense` and
+  `delete_expense` take a 1-based index into the list `get_all_expenses` printed, then
+  resolve it against a freshly queried list at call time (`expenses.py:195`, `:263`).
+  Anything that changes the list between those two moments invalidates the number: another
+  member adding or deleting in a group; the agent's own add or delete earlier in the same
+  turn; or a date edit, which rewrites the sort key (`expenses.py:227`) and so reorders the
+  list. Only `expense_num > len(items)` is rejected — an index that is in range but points
+  at the wrong row is written silently, which is the worst shape for a bug. The group case
+  is the loudest (A sees yogurt at #1, B deletes an earlier item, A's "delete 1" removes
+  something else) and was nearly observed in the first group test, but this is not
+  group-only: a private chat hits it whenever the model works from a list it printed
+  earlier in the conversation. Candidates, cheapest first:
+  - **Verify the index.** Pass the expected summary or amount alongside `expense_num` and
+    refuse the write if the item at that position does not match. No schema change, and it
+    turns a silent wrong write into a loud error the agent can recover from by re-listing.
+    Does not fix the addressing, only its failure mode
+  - **Address by sort key.** `get_all_expenses` emits the SK as a column and the two write
+    tools take it in place of a position, resolving with a single `get_item`. The key never
+    appears in what the user reads — the tool's return string is model-facing, and the
+    numbered list the user sees is a separate message the model writes. Sort keys are never
+    reused, so a stale one is either correct or absent, never someone else's row. Also
+    drops a full-partition query from both write paths. Costs ~30 tokens per expense of ISO
+    timestamp in context, and the model must transcribe 32 characters exactly; a date edit
+    still invalidates the key it rewrote, though now loudly
+  - **Give each expense a short immutable ID** at creation (e.g. six base32 characters)
+    stored as its own attribute and printed in the list. Shortest to quote back, and unlike
+    the SK it survives the date-edit rewrite. Needs a schema addition and a backfill of
+    existing items, plus either a GSI or an in-memory match over the query already being
+    run
 - [ ] **Concurrent turns share one checkpoint thread.** Two members messaging at the same
   time produce two Lambda invocations against the same `thread_id`, each reading and
   writing the whole conversation state. Expense data is unaffected — the tools write to
