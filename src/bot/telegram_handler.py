@@ -86,6 +86,9 @@ _GROUP_CHAT_TYPES = frozenset({"group", "supergroup"})
 # wording says that rather than implying a fault.
 _EMPTY_REPLY_FALLBACK = "Done."
 
+# Telegram rejects sendMessage and editMessageText payloads longer than this.
+_MAX_MESSAGE_LENGTH = 4096
+
 
 @contextmanager
 def _timed(timings: dict[str, int], phase: str) -> Iterator[None]:
@@ -182,6 +185,35 @@ def _extract_text(content: str | list[Any]) -> str:
         if isinstance(block, dict) and block.get("type") == "text"
     ]
     return "\n".join(texts)
+
+
+def _split_message(content: str) -> list[str]:
+    """Split content into chunks that each fit within Telegram's message length limit.
+
+    Splits at the last newline at or before the limit so lines stay intact. Falls back
+    to a hard cut at the limit when no newline exists in the window — for example a very
+    long line with no breaks.
+
+    Args:
+        content: The full text to split.
+
+    Returns:
+        A list of one or more non-empty strings, each at most _MAX_MESSAGE_LENGTH chars.
+    """
+    if len(content) <= _MAX_MESSAGE_LENGTH:
+        return [content]
+    chunks: list[str] = []
+    remaining = content
+    while remaining:
+        if len(remaining) <= _MAX_MESSAGE_LENGTH:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, _MAX_MESSAGE_LENGTH)
+        if split_at == -1:
+            split_at = _MAX_MESSAGE_LENGTH
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+    return chunks
 
 
 def _log_empty_reply(ledger_id: str, message: Any) -> None:
@@ -447,7 +479,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not content:
                 _log_empty_reply(ledger_id, last_msg)
                 content = _EMPTY_REPLY_FALLBACK
-            await update.message.reply_text(content, parse_mode=_parse_mode(content))
+            for chunk in _split_message(content):
+                await update.message.reply_text(chunk, parse_mode=_parse_mode(chunk))
 
     _log_timings("message", ledger_id, timings)
 
@@ -664,7 +697,11 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         content = _extract_text(result["messages"][-1].content) or "Trip ended."
 
         with _timed(timings, "send"):
-            await query.edit_message_text(content, parse_mode=_parse_mode(content))
+            chunks = _split_message(content)
+            await query.edit_message_text(chunks[0], parse_mode=_parse_mode(chunks[0]))
+            if len(chunks) > 1 and isinstance(query.message, Message):
+                for chunk in chunks[1:]:
+                    await query.message.reply_text(chunk, parse_mode=_parse_mode(chunk))
             await _send_attachments(query, pie_bytes, bar_bytes, csv_bytes)
 
         # Only once the summary and files are delivered: this discards the history the
@@ -692,7 +729,11 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         result = await asyncio.to_thread(_graph.invoke, None, config)
         last_msg = result["messages"][-1]
         content = _extract_text(last_msg.content) or "Trip ending cancelled."
-        await query.edit_message_text(content, parse_mode=_parse_mode(content))
+        chunks = _split_message(content)
+        await query.edit_message_text(chunks[0], parse_mode=_parse_mode(chunks[0]))
+        if len(chunks) > 1 and isinstance(query.message, Message):
+            for chunk in chunks[1:]:
+                await query.message.reply_text(chunk, parse_mode=_parse_mode(chunk))
 
 
 async def handle_auth_callback(

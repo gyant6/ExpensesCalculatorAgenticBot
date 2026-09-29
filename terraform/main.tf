@@ -270,10 +270,10 @@ resource "aws_lambda_function" "charts" {
 
 resource "aws_cloudwatch_log_group" "bot" {
   name              = "/aws/lambda/${local.bot_function_name}"
-  retention_in_days = 30
+  retention_in_days = 60
 }
 
 resource "aws_cloudwatch_log_group" "charts" {
   name              = "/aws/lambda/${local.chart_function_name}"
-  retention_in_days = 30
+  retention_in_days = 60
 }
