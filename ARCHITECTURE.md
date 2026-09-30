@@ -590,13 +590,43 @@ per-turn timing line included — is dropped in production while polling looks f
 
 ---
 
+### Setting up Terraform on a new machine
+
+State is in S3 (Phase 2, Step 8), so a fresh clone needs only the two gitignored local
+files, in both `terraform/` and `terraform/bootstrap/`:
+
+- `local.auto.tfvars` — `aws_account_id` and `aws_profile`; see the note in
+  `terraform/terraform.tfvars`
+- `backend.local.hcl` — `profile = "<the same profile>"`. Backend blocks cannot read
+  variables, so the backend needs the profile given separately
+
+Then, in each directory:
+
+```
+terraform init -backend-config=backend.local.hcl
+terraform plan
+```
+
+`plan` should show no changes. If it proposes creating resources that already exist, it is
+not reading the S3 state — check the init output named the `s3` backend.
+
+---
+
 ### Recovering Terraform state
 
-The Terraform state file (`terraform.tfstate`) is gitignored and local. If it is lost,
-Terraform has no record of the deployed resources and will plan to create all 18 from
-scratch — which would conflict with what already exists in AWS. The fix is to import
-each resource into a fresh local state (or into an S3 backend if that migration has
-been done).
+Each config's state is one object in `expenses-bot-tfstate-ojg0cd`: `bot/terraform.tfstate`
+and `bootstrap/terraform.tfstate`. If it is deleted or overwritten by a bad apply, restore a
+previous version first — versioning keeps superseded versions for 90 days:
+
+```
+aws s3api list-object-versions --bucket expenses-bot-tfstate-ojg0cd --prefix bot/terraform.tfstate
+aws s3api copy-object --bucket expenses-bot-tfstate-ojg0cd --key bot/terraform.tfstate --copy-source "expenses-bot-tfstate-ojg0cd/bot/terraform.tfstate?versionId=<VERSION_ID>"
+```
+
+Importing is the last resort, for when no usable version exists. Without state, Terraform
+has no record of the deployed resources and will plan to create all 18 from scratch — which
+would conflict with what already exists in AWS. The fix is to import each resource into a
+fresh state.
 
 Run these from the `terraform/` directory after `terraform init`. Each command is
 idempotent — rerun it safely if a previous attempt failed partway through.
@@ -1037,28 +1067,19 @@ to a REST API later means replacing the gateway and re-running `setWebhook`.
 - [ ] Prompt attack filter: detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
 
 #### Step 8 — Terraform state in S3
-- [ ] Migrate Terraform state to an S3 backend with DynamoDB locking. The state file is currently local and gitignored — losing the machine that ran `terraform apply` loses the state, and any config change must then either use the AWS CLI directly or re-import all 18 resources. An S3 backend removes both constraints: the state is durable, CI/CD can read it, and a fresh clone just runs `terraform init`.
+- [x] Migrate Terraform state to an S3 backend. The state was local and gitignored, so it existed only on the machine that last ran `apply`; another machine saw no state and would have planned to create all 18 resources again. Both configs now keep their state in `expenses-bot-tfstate-ojg0cd`:
 
-  Steps:
-  1. Create the state bucket and lock table:
-     ```bash
-     aws s3api create-bucket --bucket expenses-bot-tfstate-ojg0cd --region ap-southeast-1 --create-bucket-configuration LocationConstraint=ap-southeast-1
-     aws s3api put-bucket-versioning --bucket expenses-bot-tfstate-ojg0cd --versioning-configuration Status=Enabled
-     aws dynamodb create-table --table-name expenses-bot-tfstate-lock --attribute-definitions AttributeName=LockID,AttributeType=S --key-schema AttributeName=LockID,KeyType=HASH --billing-mode PAY_PER_REQUEST --region ap-southeast-1
-     ```
-  2. Add a `backend "s3"` block to `providers.tf`:
-     ```hcl
-     terraform {
-       backend "s3" {
-         bucket         = "expenses-bot-tfstate-ojg0cd"
-         key            = "terraform.tfstate"
-         region         = "ap-southeast-1"
-         dynamodb_table = "expenses-bot-tfstate-lock"
-         encrypt        = true
-       }
-     }
-     ```
-  3. Migrate existing local state (if it exists) or import all resources from scratch (see **Recovering Terraform state** in the Runbook).
+  | Key | Written by |
+  |---|---|
+  | `bootstrap/terraform.tfstate` | `terraform/bootstrap/` — the bucket itself (7 resources) |
+  | `bot/terraform.tfstate` | `terraform/` — the bot (18 resources) |
+
+  - **The bucket is its own config, `terraform/bootstrap/`,** so nothing in the main config — `terraform destroy` included — can delete the bucket holding its own state. `prevent_destroy` refuses any plan that would delete it. Its first apply necessarily ran on local state; that state was then migrated into the bucket it had just created
+  - **Bucket settings:** versioning (the S3 backend docs recommend it for recovering from a bad apply or a deletion), SSE-S3 encryption, all four Block Public Access flags, `BucketOwnerEnforced` so ACLs are disabled, a policy denying any request not made over TLS, and a lifecycle rule expiring superseded versions after 90 days. Verified against the live bucket after apply; a plain HTTP request returns 403
+  - **Locking uses `use_lockfile`, not a DynamoDB table.** The S3 backend docs mark `dynamodb_table` deprecated and say DynamoDB-based locking "will be removed in a future minor version". `required_version` is `>= 1.10` in both configs for this argument
+  - **The bucket name carries a random suffix,** not the account ID, since S3 names are global and the account ID is kept out of the repository
+  - **The AWS profile is not committed.** Backend blocks cannot read variables, so it goes in a gitignored `backend.local.hcl` passed at init — see **Setting up Terraform on a new machine** in the Runbook
+  - Verified: after migration both configs plan with no changes against state read from S3, and still do with every local state file deleted
 
 ---
 

@@ -1,10 +1,26 @@
 terraform {
-  required_version = ">= 1.6"
+  # use_lockfile below needs 1.10 or later.
+  required_version = ">= 1.10"
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+  }
+
+  # State lives in the bucket created by terraform/bootstrap/, so it is shared by every
+  # machine and CI rather than held on whichever laptop last ran apply. use_lockfile
+  # writes a lock object beside the state, stopping two applies from running at once; it
+  # replaces the deprecated DynamoDB lock table.
+  #
+  # Backend blocks cannot read variables, so these values are literal. The AWS profile is
+  # not committed: pass it at init with `-backend-config=backend.local.hcl`.
+  backend "s3" {
+    bucket       = "expenses-bot-tfstate-ojg0cd"
+    key          = "bot/terraform.tfstate"
+    region       = "ap-southeast-1"
+    encrypt      = true
+    use_lockfile = true
   }
 }
 
