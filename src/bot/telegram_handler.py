@@ -4,7 +4,7 @@ import asyncio
 import io
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -70,6 +70,7 @@ _AUTH_USAGE = "Usage:\n" + "\n".join(
 # distinct error codes for them.
 _MESSAGE_NOT_MODIFIED = "not modified"
 _QUERY_EXPIRED = "query is too old"
+_CANT_PARSE_ENTITIES = "can't parse entities"
 
 # Shown in place of the confirmation keyboard while the trip is being ended, then
 # overwritten with the summary. Ending a trip takes several seconds — an FX fetch, chart
@@ -214,6 +215,85 @@ def _split_message(content: str) -> list[str]:
         chunks.append(remaining[:split_at])
         remaining = remaining[split_at:].lstrip("\n")
     return chunks
+
+
+async def _send_formatted(send: Callable[..., Awaitable[object]], text: str) -> None:
+    """Send one chunk as HTML when it contains markup, falling back to plain text.
+
+    `_parse_mode` selects HTML for any text containing "<", so Telegram rejects the whole
+    message whenever that markup does not parse: a tag the model left unclosed, a literal
+    comparison such as "cost < 5", or a tag pair that `_split_message` cut across two
+    chunks. Resending the same text unformatted delivers it with any tags shown raw, rather
+    than losing the reply to the error handler.
+
+    Args:
+        send: The bound Telegram method that delivers the text, such as
+            `Message.reply_text` or `CallbackQuery.edit_message_text`. Called with the
+            text and a `parse_mode` keyword.
+        text: The chunk to send. Must fit within Telegram's message length limit.
+
+    Raises:
+        telegram.error.BadRequest: If Telegram rejects the text for any reason other than
+            unparseable HTML, or rejects the plain-text resend.
+        telegram.error.TelegramError: If the call fails for any other reason.
+    """
+    parse_mode = _parse_mode(text)
+    try:
+        await send(text, parse_mode=parse_mode)
+    except BadRequest as exc:
+        if parse_mode is None or _CANT_PARSE_ENTITIES not in str(exc).lower():
+            raise
+        # The error names the offending tag and its byte offset, never the message text,
+        # so it is safe to log.
+        logger.warning(
+            "Reply HTML rejected by Telegram, resending as plain text: %s", exc
+        )
+        await send(text, parse_mode=None)
+
+
+async def _reply_in_chunks(message: Message, content: str) -> None:
+    """Reply to a message with content, split across as many messages as it needs.
+
+    Args:
+        message: The message to reply to.
+        content: The full reply text, of any length.
+
+    Raises:
+        telegram.error.TelegramError: If Telegram rejects a chunk; see `_send_formatted`.
+            Chunks before the failing one have already been delivered.
+    """
+    for chunk in _split_message(content):
+        await _send_formatted(message.reply_text, chunk)
+
+
+async def _edit_in_chunks(query: CallbackQuery, content: str) -> None:
+    """Replace a callback's message with content, sending any overflow as replies to it.
+
+    The first chunk overwrites the message carrying the keyboard, so a short reply
+    appears in its place with nothing added to the chat. Only the chunks that do not fit
+    are sent as new messages.
+
+    Args:
+        query: The callback query whose message is edited.
+        content: The full reply text, of any length.
+
+    Raises:
+        telegram.error.TelegramError: If Telegram rejects a chunk; see `_send_formatted`.
+    """
+    first, *overflow = _split_message(content)
+    await _send_formatted(query.edit_message_text, first)
+    if not overflow:
+        return
+
+    message = query.message
+    if not isinstance(message, Message):
+        logger.warning(
+            "Callback message is unavailable; %d overflow chunk(s) were not sent.",
+            len(overflow),
+        )
+        return
+    for chunk in overflow:
+        await _send_formatted(message.reply_text, chunk)
 
 
 def _log_empty_reply(ledger_id: str, message: Any) -> None:
@@ -479,8 +559,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not content:
                 _log_empty_reply(ledger_id, last_msg)
                 content = _EMPTY_REPLY_FALLBACK
-            for chunk in _split_message(content):
-                await update.message.reply_text(chunk, parse_mode=_parse_mode(chunk))
+            await _reply_in_chunks(update.message, content)
 
     _log_timings("message", ledger_id, timings)
 
@@ -697,11 +776,7 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         content = _extract_text(result["messages"][-1].content) or "Trip ended."
 
         with _timed(timings, "send"):
-            chunks = _split_message(content)
-            await query.edit_message_text(chunks[0], parse_mode=_parse_mode(chunks[0]))
-            if len(chunks) > 1 and isinstance(query.message, Message):
-                for chunk in chunks[1:]:
-                    await query.message.reply_text(chunk, parse_mode=_parse_mode(chunk))
+            await _edit_in_chunks(query, content)
             await _send_attachments(query, pie_bytes, bar_bytes, csv_bytes)
 
         # Only once the summary and files are delivered: this discards the history the
@@ -729,11 +804,7 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         result = await asyncio.to_thread(_graph.invoke, None, config)
         last_msg = result["messages"][-1]
         content = _extract_text(last_msg.content) or "Trip ending cancelled."
-        chunks = _split_message(content)
-        await query.edit_message_text(chunks[0], parse_mode=_parse_mode(chunks[0]))
-        if len(chunks) > 1 and isinstance(query.message, Message):
-            for chunk in chunks[1:]:
-                await query.message.reply_text(chunk, parse_mode=_parse_mode(chunk))
+        await _edit_in_chunks(query, content)
 
 
 async def handle_auth_callback(
