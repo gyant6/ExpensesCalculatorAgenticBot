@@ -623,60 +623,11 @@ aws s3api list-object-versions --bucket expenses-bot-tfstate-ojg0cd --prefix bot
 aws s3api copy-object --bucket expenses-bot-tfstate-ojg0cd --key bot/terraform.tfstate --copy-source "expenses-bot-tfstate-ojg0cd/bot/terraform.tfstate?versionId=<VERSION_ID>"
 ```
 
-Importing is the last resort, for when no usable version exists. Without state, Terraform
-has no record of the deployed resources and will plan to create all 18 from scratch — which
-would conflict with what already exists in AWS. The fix is to import each resource into a
-fresh state.
-
-Run these from the `terraform/` directory after `terraform init`. Each command is
-idempotent — rerun it safely if a previous attempt failed partway through.
-
-```bash
-# DynamoDB
-terraform import aws_dynamodb_table.expenses ExpensesCalculator
-
-# SSM Parameters
-terraform import aws_ssm_parameter.telegram_bot_token /ExpensesCalculatorAgenticBot/telegram-bot-token
-terraform import aws_ssm_parameter.admin_telegram_id  /ExpensesCalculatorAgenticBot/admin-telegram-id
-terraform import aws_ssm_parameter.webhook_secret     /ExpensesCalculatorAgenticBot/webhook-secret
-
-# IAM
-terraform import aws_iam_role.lambda_exec               ExpensesCalculatorAgenticBot-lambda-exec
-terraform import aws_iam_role_policy.lambda_exec_policy ExpensesCalculatorAgenticBot-lambda-exec:ExpensesCalculatorAgenticBot-lambda-exec-policy
-terraform import aws_iam_role.chart_lambda_exec               ExpensesCalculatorAgenticBot-chart-lambda-exec
-terraform import aws_iam_role_policy.chart_lambda_exec_policy ExpensesCalculatorAgenticBot-chart-lambda-exec:ExpensesCalculatorAgenticBot-chart-lambda-exec-policy
-
-# Lambda functions
-terraform import aws_lambda_function.bot    ExpensesCalculatorAgenticBot
-terraform import aws_lambda_function.charts ExpensesCalculatorAgenticBot-charts
-
-# Lambda permission (API Gateway → bot function)
-terraform import aws_lambda_permission.webhook ExpensesCalculatorAgenticBot/AllowExecutionFromAPIGateway
-
-# CloudWatch log groups
-terraform import aws_cloudwatch_log_group.bot     /aws/lambda/ExpensesCalculatorAgenticBot
-terraform import aws_cloudwatch_log_group.charts  /aws/lambda/ExpensesCalculatorAgenticBot-charts
-terraform import aws_cloudwatch_log_group.webhook /aws/apigateway/ExpensesCalculatorAgenticBot-webhook
-
-# API Gateway — the IDs are account-specific; look them up first if they have changed:
-#   aws apigatewayv2 get-apis --region ap-southeast-1 --query "Items[?Name=='ExpensesCalculatorAgenticBot-webhook']"
-#   aws apigatewayv2 get-integrations --api-id <API_ID> --region ap-southeast-1
-#   aws apigatewayv2 get-routes       --api-id <API_ID> --region ap-southeast-1
-#
-# At the time of the original deploy these were:
-#   API_ID:           s90cd2my3e
-#   Integration ID:   3qivice
-#   Route ID:         uw865gh
-terraform import aws_apigatewayv2_api.webhook         s90cd2my3e
-terraform import aws_apigatewayv2_integration.webhook s90cd2my3e/3qivice
-terraform import aws_apigatewayv2_route.webhook       s90cd2my3e/uw865gh
-terraform import aws_apigatewayv2_stage.webhook       s90cd2my3e/$default
-```
-
-After all imports complete, run `terraform plan` — it should show 0 changes if every
-resource was imported and the config matches what is deployed. Any diff indicates a
-config drift (e.g. the 60-day CloudWatch retention applied via CLI after the state was
-lost). Fix drifts by running `terraform apply` on those resources only.
+If no usable version exists — in practice, only if the bucket itself was deleted — the
+resources are still running in AWS but Terraform has no record of them, and would plan to
+create all of them again. The last resort is to import each one into a fresh state — the
+resource blocks in `terraform/` name what to import — and not to apply anything until
+`terraform plan` shows no changes.
 
 ---
 
