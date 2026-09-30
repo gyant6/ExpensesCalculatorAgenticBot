@@ -1042,15 +1042,15 @@ to a REST API later means replacing the gateway and re-running `setWebhook`.
   Steps:
   1. Create the state bucket and lock table:
      ```bash
-     aws s3api create-bucket --bucket expenses-bot-tfstate-<account-id> --region ap-southeast-1 --create-bucket-configuration LocationConstraint=ap-southeast-1
-     aws s3api put-bucket-versioning --bucket expenses-bot-tfstate-<account-id> --versioning-configuration Status=Enabled
+     aws s3api create-bucket --bucket expenses-bot-tfstate-ojg0cd --region ap-southeast-1 --create-bucket-configuration LocationConstraint=ap-southeast-1
+     aws s3api put-bucket-versioning --bucket expenses-bot-tfstate-ojg0cd --versioning-configuration Status=Enabled
      aws dynamodb create-table --table-name expenses-bot-tfstate-lock --attribute-definitions AttributeName=LockID,AttributeType=S --key-schema AttributeName=LockID,KeyType=HASH --billing-mode PAY_PER_REQUEST --region ap-southeast-1
      ```
   2. Add a `backend "s3"` block to `providers.tf`:
      ```hcl
      terraform {
        backend "s3" {
-         bucket         = "expenses-bot-tfstate-<account-id>"
+         bucket         = "expenses-bot-tfstate-ojg0cd"
          key            = "terraform.tfstate"
          region         = "ap-southeast-1"
          dynamodb_table = "expenses-bot-tfstate-lock"
@@ -1148,6 +1148,12 @@ uv run pre-commit run --all-files
 - [ ] IAM OIDC identity provider configured in AWS account
 - [ ] Deploy IAM role with trust policy scoped to this repo + main branch
 - [ ] Manual approval gate before prod deploy (GitHub Actions environment protection rule)
+- [ ] Unit tests for `_split_message` in `test_telegram_handler.py`, which shipped without
+  any. Cases: content exactly at 4096 characters stays one chunk; 4097 splits; the split
+  falls on the last newline inside the window; a single line with no newline takes the
+  hard cut at 4096; content needing three or more chunks; leading newlines are stripped
+  from the next chunk and no chunk is empty; every chunk is at most 4096 characters and
+  joining them loses no non-newline text
 
 ### Phase 4 — Shared-ledger correctness (future)
 
