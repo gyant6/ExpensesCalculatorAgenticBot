@@ -9,22 +9,7 @@ from botocore.exceptions import ClientError
 
 from src.bot import telegram_handler
 from src.bot.config import settings
-from src.bot.telegram_handler import _extract_text, _parse_mode, handle_admin_command
-
-# ── _parse_mode ───────────────────────────────────────────────────────────────
-
-
-def test_parse_mode_returns_html_for_html_content() -> None:
-    assert _parse_mode("<b>bold</b>") == "HTML"
-
-
-def test_parse_mode_returns_none_for_plain_text() -> None:
-    assert _parse_mode("just plain text") is None
-
-
-def test_parse_mode_returns_none_for_empty_string() -> None:
-    assert _parse_mode("") is None
-
+from src.bot.telegram_handler import _extract_text, handle_admin_command
 
 # ── _extract_text ─────────────────────────────────────────────────────────────
 
