@@ -396,6 +396,7 @@ Consequences worth knowing:
 |---|---|---|---|
 | `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date` | Active trip marker |
 | `USER#<ledger_id>` | `EXPENSE#<datetime>` | see below | Individual expense |
+| `USER#<ledger_id>` | `ARCHIVE#<ended_at>` | `start_date`, `ended_at`, `expenses`, `ttl` | An ended trip's expenses, kept for `TRIP_ARCHIVE_TTL_SECONDS` (90 days) |
 | `AUTH#<id>` | `PROFILE` | `status`, `entity_type`, `username`, `requested_at`, `reviewed_at` | Access control record (user or group) |
 
 `<id>` is the Telegram user ID (positive) or group ID (negative). `entity_type` is `USER` or `GROUP`. `status` is `PENDING`, `APPROVED`, or `REJECTED`.
@@ -414,6 +415,17 @@ Consequences worth knowing:
 | `summary` | String | `Dinner at Ichiran ramen` |
 | `payment_method` | String | `Cash` |
 | `updated_at` | String (ISO-8601) | `2026-06-04T13:45:00.000000+00:00` |
+
+**Trip archive item.** `end_trip` copies the trip into a single item before deleting
+anything, so ending a trip by mistake, or losing the CSV sent to the chat, is
+recoverable. `expenses` is a list holding every expense item in full, minus `PK`. `ttl`
+is epoch seconds; the table's TTL setting names that attribute, and DynamoDB deletes the
+item some time after it passes — typically within days, not at the second. Each archive
+carries its own `ttl`, so retention could differ per trip later without a schema change.
+One item rather than one per expense, so the archive is one put that lands whole or not
+at all; DynamoDB's 400 KB item limit caps a trip at roughly a thousand expenses, beyond
+which the put fails and nothing is deleted. Nothing in the bot reads archives yet:
+restoring one is done by hand with the AWS CLI.
 
 **Local vs prod switch:** Set `DYNAMODB_ENDPOINT_URL=http://localhost:8000` in local `.env`. Unset (or absent) in prod — boto3 connects to real DynamoDB automatically.
 
@@ -457,7 +469,8 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
   2. Queries all `EXPENSE#*` items for the user.
   3. Calls `get_sgd_exchange_rates()`. On failure it continues without rates rather than blocking the trip from ending.
   4. Builds the CSV via `generate_csv(expenses, fx_rates)` — before any deletion, so a failed export leaves the trip intact rather than destroying records with no copy of them.
-  5. Deletes every `EXPENSE#*` item and the `TRIP#ACTIVE` item.
+  5. Writes the `ARCHIVE#<ended_at>` item holding every expense, with a `ttl` 90 days out. Skipped for a trip with no expenses. If this write fails, the tool fails and nothing is deleted.
+  6. Deletes every `EXPENSE#*` item and the `TRIP#ACTIVE` item.
 - **Returns (to LLM):** A confirmation line followed by the CSV of all expenses, including the `amount_sgd` column, so the summary is written from real figures. If rates were unavailable, `amount_sgd` is blank and the CSV is prefixed with an instruction to give per-currency totals and state no SGD total — without that instruction the model invents an exchange rate to satisfy the system prompt's request for one.
 - **On confirm (`handle_callback`):**
   1. Renders the charts and the CSV attachment from the live expense data. This must precede the resume, because the tool deletes that data.
@@ -691,7 +704,7 @@ Test each tool and storage function in complete isolation. All external dependen
 
 | Test file | Scenarios covered |
 |---|---|
-| `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` returns the CSV and deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` still exports and deletes when FX rates are unavailable, prefixing the no-SGD instruction; `end_trip` returns an error when no trip is active |
+| `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` returns the CSV and deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` still exports and deletes when FX rates are unavailable, prefixing the no-SGD instruction; `end_trip` returns an error when no trip is active. Archive: every expense is copied in full with the start date and a `ttl` at the configured retention; the archive is invisible to the next trip's `EXPENSE#` queries; a failed archive write deletes nothing; an empty trip writes no archive. Confirmed non-vacuous by mutation — removing the archive fails three tests, moving it after the deletes fails one |
 | `test_config.py` | `LOG_LEVEL` is upper-cased and whitespace-stripped; the normalised value is accepted by `logging`; unknown levels raise `ValidationError` |
 | `test_expenses.py` | `add_expense` writes item with raw amount and currency; `edit_expense` updates only the specified fields; `delete_expense` removes correct item; `get_all_expenses` returns a no-expenses message when the user has none |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |

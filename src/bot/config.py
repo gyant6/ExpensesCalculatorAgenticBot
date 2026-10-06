@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     # writes a `ttl` epoch attribute on every checkpoint; DynamoDB's TTL process deletes
     # items past that timestamp automatically. Defaults to 90 days.
     CHECKPOINT_TTL_SECONDS: int = 7_776_000
+    # How long an ended trip's archived expenses are kept before DynamoDB's TTL process
+    # deletes them. The archive is the only copy besides the CSV sent to the chat, so it
+    # covers a trip ended by mistake or a lost export. Defaults to 90 days.
+    TRIP_ARCHIVE_TTL_SECONDS: int = 7_776_000
 
     @field_validator("LOG_LEVEL")
     @classmethod

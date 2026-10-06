@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
+import pytest
 import respx
+from botocore.exceptions import ClientError
 from httpx import Response
 
+from src.bot.config import settings
 from src.bot.export import CSV_FIELDNAMES
 from src.bot.storage import dynamodb
 from src.bot.tools import trip
@@ -61,6 +64,7 @@ def test_end_trip_with_no_expenses(dynamodb_table: DynamoDBClient) -> None:
     assert CSV_HEADER in tool_output
     assert trip.FX_UNAVAILABLE_NOTICE not in tool_output
     assert dynamodb.get_item(pk, "TRIP#ACTIVE") is None
+    assert dynamodb.query_by_prefix(pk, trip.ARCHIVE_SK_PREFIX) == []
 
 
 @respx.mock
@@ -106,6 +110,81 @@ def test_end_trip_still_exports_and_deletes_when_rates_unavailable(
     assert "Breakfast at Yakun" in tool_output
     assert dynamodb.query_by_prefix(pk, "EXPENSE#") == []
     assert dynamodb.get_item(pk, "TRIP#ACTIVE") is None
+
+
+@respx.mock
+def test_end_trip_archives_every_expense_with_an_expiry(
+    dynamodb_table: DynamoDBClient, base_expense: dict[str, Any]
+) -> None:
+    """The archive is the only copy besides the CSV in the chat, so it must hold every
+    expense in full, and carry the expiry DynamoDB's TTL process deletes it by.
+    """
+    respx.get(FX_URL).mock(
+        return_value=Response(200, json={"success": True, "rates": {"JPY": 124.1}})
+    )
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    dynamodb.put_item({"PK": pk, "SK": "TRIP#ACTIVE", "start_date": "2025-12-20"})
+    dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
+    dynamodb.put_item({"PK": pk, "SK": "EXPENSE#2", **base_expense, "amount": "9.5"})
+
+    before = int(datetime.now(timezone.utc).timestamp())
+    trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+    after = int(datetime.now(timezone.utc).timestamp())
+
+    archives = dynamodb.query_by_prefix(pk, trip.ARCHIVE_SK_PREFIX)
+    assert len(archives) == 1
+    archive = archives[0]
+    assert archive["start_date"] == "2025-12-20"
+    assert archive["SK"] == f"{trip.ARCHIVE_SK_PREFIX}{archive['ended_at']}"
+    assert archive["expenses"] == [
+        {"SK": "EXPENSE#1", **base_expense},
+        {"SK": "EXPENSE#2", **base_expense, "amount": "9.5"},
+    ]
+    retention = settings.TRIP_ARCHIVE_TTL_SECONDS
+    assert before + retention <= archive[trip.TTL_ATTRIBUTE] <= after + retention
+
+
+@respx.mock
+def test_archive_is_invisible_to_the_next_trip(
+    dynamodb_table: DynamoDBClient, base_expense: dict[str, Any]
+) -> None:
+    # The archive shares the ledger's partition with live expenses, so it must sit
+    # outside the EXPENSE# prefix every expense tool lists, edits and deletes by.
+    respx.get(FX_URL).mock(
+        return_value=Response(200, json={"success": True, "rates": {"JPY": 124.1}})
+    )
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    dynamodb.put_item({"PK": pk, "SK": "TRIP#ACTIVE", "start_date": "2025-12-20"})
+    dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
+    trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+
+    trip.start_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+
+    assert dynamodb.query_by_prefix(pk, "EXPENSE#") == []
+    assert len(dynamodb.query_by_prefix(pk, trip.ARCHIVE_SK_PREFIX)) == 1
+
+
+@respx.mock
+def test_nothing_is_deleted_when_the_archive_cannot_be_written(
+    dynamodb_table: DynamoDBClient, base_expense: dict[str, Any]
+) -> None:
+    respx.get(FX_URL).mock(
+        return_value=Response(200, json={"success": True, "rates": {"JPY": 124.1}})
+    )
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    dynamodb.put_item({"PK": pk, "SK": "TRIP#ACTIVE", "start_date": "2025-12-20"})
+    dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
+    rejected = ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "Item size too large"}},
+        "PutItem",
+    )
+
+    with patch.object(dynamodb, "put_item", side_effect=rejected):
+        with pytest.raises(ClientError, match="Item size too large"):
+            trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+
+    assert len(dynamodb.query_by_prefix(pk, "EXPENSE#")) == 1
+    assert dynamodb.get_item(pk, "TRIP#ACTIVE") is not None
 
 
 def test_end_trip_returns_error_when_no_active_trip(

@@ -1,8 +1,8 @@
 """LangChain tools for starting and ending an overseas trip."""
 
 import logging
-from datetime import datetime
-from typing import Annotated
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -10,11 +10,20 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 from pydantic import ValidationError
 
+from src.bot.config import settings
 from src.bot.export import generate_csv
 from src.bot.storage import dynamodb
 from src.bot.tools.fx import get_sgd_exchange_rates
 
 logger = logging.getLogger(__name__)
+
+# Sort-key prefix of an ended trip's archive item. Deliberately not EXPENSE# or TRIP#, so
+# no query for the current trip's expenses or its active marker can ever match it.
+ARCHIVE_SK_PREFIX = "ARCHIVE#"
+
+# Must match `ttl.attribute_name` on the table in terraform/main.tf. DynamoDB deletes an
+# item once the epoch-seconds value in this attribute has passed.
+TTL_ATTRIBUTE = "ttl"
 
 END_TRIP_SUCCESS = "Trip successfully ended."
 NO_ACTIVE_TRIP = (
@@ -66,18 +75,53 @@ def start_trip(
     return f"New trip started on {start_date}."
 
 
+def _archive_trip(pk: str, start_date: str, expenses: list[dict[str, Any]]) -> None:
+    """Copy an ended trip's expenses into one archive item that expires on its own.
+
+    One item rather than one per expense, so the archive is written by a single put that
+    either lands whole or not at all. DynamoDB caps an item at 400 KB, which holds
+    roughly a thousand expenses; past that the put fails, and the caller deletes nothing.
+
+    Args:
+        pk: Partition key of the ledger whose trip is ending (e.g. 'USER#123456789').
+        start_date: The trip's start date, from its TRIP#ACTIVE marker.
+        expenses: Every expense item of the trip, as returned by query_by_prefix.
+
+    Raises:
+        botocore.exceptions.ClientError: If the DynamoDB request fails, including when
+            the item exceeds DynamoDB's size limit.
+    """
+    ended_at = datetime.now(timezone.utc)
+    expires_at = ended_at + timedelta(seconds=settings.TRIP_ARCHIVE_TTL_SECONDS)
+    dynamodb.put_item(
+        {
+            "PK": pk,
+            "SK": f"{ARCHIVE_SK_PREFIX}{ended_at.isoformat(timespec='microseconds')}",
+            "start_date": start_date,
+            "ended_at": ended_at.isoformat(timespec="microseconds"),
+            # PK is the same for every expense and already on the archive item.
+            "expenses": [
+                {key: value for key, value in expense.items() if key != "PK"}
+                for expense in expenses
+            ],
+            TTL_ATTRIBUTE: int(expires_at.timestamp()),
+        }
+    )
+
+
 @tool
 def end_trip(
     ledger_id: Annotated[str, InjectedState("ledger_id")],
 ) -> str:
-    """End the active trip, export its expenses as CSV, and delete all trip records.
+    """End the active trip, export its expenses as CSV, and archive then delete them.
 
     Call this when the user asks to end the trip. Always call get_all_expenses first to
     present the summary, then call this tool. The user will be shown a confirmation
     prompt by the application before this tool actually executes.
 
-    The CSV is built before anything is deleted, so a failure to export leaves the trip
-    intact rather than destroying records with no copy of them.
+    The CSV is built and the expenses archived before anything is deleted, so a failure
+    at either step leaves the trip intact rather than destroying records with no copy of
+    them. The archive expires after TRIP_ARCHIVE_TTL_SECONDS.
 
     Args:
         ledger_id: The Telegram user ID of the user ending the trip.
@@ -93,7 +137,8 @@ def end_trip(
         botocore.exceptions.ClientError: If a DynamoDB request fails.
     """
     pk = f"USER#{ledger_id}"
-    if dynamodb.get_item(pk, "TRIP#ACTIVE") is None:
+    active_trip = dynamodb.get_item(pk, "TRIP#ACTIVE")
+    if active_trip is None:
         return NO_ACTIVE_TRIP
 
     expenses = dynamodb.query_by_prefix(pk, "EXPENSE#")
@@ -110,8 +155,11 @@ def end_trip(
             )
             rates_unavailable = True
 
-    # Export before deleting. If this raises, the tool fails and nothing is removed.
+    # Export and archive before deleting. If either raises, the tool fails and nothing is
+    # removed. A trip with no expenses has nothing worth keeping, so it is not archived.
     csv_text = generate_csv(expenses, fx_rates).decode("utf-8")
+    if expenses:
+        _archive_trip(pk, active_trip["start_date"], expenses)
 
     for expense in expenses:
         dynamodb.delete_item(pk, expense["SK"])
