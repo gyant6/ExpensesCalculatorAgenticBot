@@ -1199,3 +1199,71 @@ the sender.
 - [ ] Receipt image parsing (user sends photo, agent extracts expense via vision)
 - [ ] Budget alerts (warn user when spending exceeds a threshold)
 - [ ] FX rate caching per day (avoid redundant API calls for same currency on same day)
+
+### Phase 6 — Model, context and cost (future)
+
+Measured on the September trip (11 Sep – 7 Oct 2026, Haiku 4.5) from Bedrock's CloudWatch
+metrics: 297 model calls, **10.23M input tokens**, 55K output tokens, no cache reads or
+writes. The largest single request grew from 3.5K tokens on day one to 90K by the end,
+because each call resends the whole trip's checkpointed conversation. Input is therefore
+over 99% of the bill, roughly $10.50 for the trip at Anthropic's list price — Bedrock's
+own Claude prices were not verified, as its pricing page renders those tables client-side.
+
+- [ ] **Bound the context sent to the model, and cache the stable prefix.** The first lever,
+  ahead of any model change, because it cuts cost, latency and error rate together:
+  - *Send recent turns only.* Trim the history passed to the model to the last N turns
+    (LangGraph `trim_messages` in the agent node, or a pre-model hook), leaving the
+    checkpoint itself intact. Nothing is lost: every tool reads live data from DynamoDB,
+    so old turns are only conversation. The trim must start at a human message and never
+    split a `tool_use` from its `tool_result`, and must keep the pending `end_trip` call
+    while the confirmation interrupt is outstanding
+  - *Why it matters beyond cost.* By late in the trip the model was reading dozens of
+    numbered lists with stale positions — a likely contributor to the wrong-row edits in
+    Phase 4 — and the 30 Sep "show all" turn spent 26 s of its 27.5 s in the model
+  - *Prompt caching.* Mark the system prompt and tool definitions as a cache point
+    through Converse's `cachePoint`. Whether `ChatBedrockConverse` exposes it, and the
+    model's minimum cacheable prefix, are unverified. A sliding window shifts the history
+    prefix every turn, so cache only the fixed part, not the history
+  - Verify with the same CloudWatch metrics: `InputTokenCount` per call should plateau,
+    and `CacheReadInputTokenCount` should become non-zero
+- [ ] **Move the chat model to Claude Haiku 5.5.** `global.anthropic.claude-haiku-5-5` is
+  ACTIVE in ap-southeast-1 (checked 8 Oct 2026). List price $0.10 / $0.50 per MTok for
+  prompts up to 100K tokens and $0.50 / $2.50 above, against $1 / $5 for Haiku 4.5; the
+  same text is ~30% more tokens, so roughly 7–8× cheaper per call below 100K. Without
+  the context bound above, late-trip calls (80–90K today, ~115K after the tokenizer
+  change) would cross onto the higher rate card. Required changes, each of which
+  otherwise fails or degrades the first request:
+  - Remove `temperature=0.3` from `ChatBedrockConverse` in `nodes.py`: any non-default
+    sampling parameter returns a 400. Consistency comes from the prompt, the validating
+    tools and `effort`
+  - Thinking is adaptive and on by default. Set `effort` (`low` or `medium` for chat)
+    through the Converse request fields, and leave `max_tokens` room for thinking.
+    Verify, before switching production, that `langchain-aws` returns reasoning blocks
+    to the model unchanged across checkpointed turns — editing earlier turns invalidates
+    them. The graph is append-only apart from `clear_thread_history` at trip end, which
+    removes the thread whole. `_extract_text` already reads text blocks by type
+  - Handle `stop_reason == "refusal"`: Bedrock has no server-side fallback, so a decline
+    must produce a clear reply rather than the generic error
+  - Update `bedrock_model_id` in `terraform.tfvars`. The IAM grant is derived from it
+    (`main.tf`, the inference-profile and foundation-model ARNs), so it follows
+  - Confirm Bedrock's per-token price before switching, and re-baseline cost dashboards
+    for the new tokenizer rather than reading the jump as a regression
+  - Run the manual end-to-end script (Layer 2b) against the new model first; the Layer 3
+    evals are still unbuilt
+- [ ] **End-of-trip analysis by a larger model, from totals the code computes.** The trip
+  summary is meant as analysis — patterns, where the money went, outliers — which is the
+  one step where a stronger model earns its cost. On the September trip it also got the
+  arithmetic wrong: it reported SGD 3,629.34 for a CSV totalling SGD 3,413.08 (Food
+  1,033.61 vs 977.07, Leisure 148.37 vs 94.37, Misc 32.64 vs 52.74), having summed 88
+  rows itself. A larger model makes that rarer, not impossible, so both changes go
+  together:
+  - Compute the figures in `end_trip` from the same data as the CSV: overall SGD total,
+    per category, per day, per currency where rates are missing, and the largest
+    expenses. Pass them in the tool result with an instruction to quote them as given
+  - Write the summary in a dedicated graph node on Claude Sonnet 5.5 or Opus 5.5 (both
+    ACTIVE as `global.` profiles in ap-southeast-1), leaving the chat on Haiku. It runs
+    once per trip on ~5–10K input tokens: roughly $0.02–0.05 on Sonnet 5.5 and $0.05–0.10
+    on Opus 5.5 at list price
+  - Same request changes as Haiku 5.5 (no `temperature`, adaptive thinking, refusal
+    handling), plus a second model ID in Terraform and its own IAM grant, since the
+    current grant is derived from the single chat model
