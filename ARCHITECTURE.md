@@ -1174,10 +1174,17 @@ the sender.
     from memory (double-counting three and inventing a second Coffee coffee) and
     reported "All restored!" without checking anything.
 
-  Fix:
-  - Give each expense a short immutable ID at creation, printed in `get_all_expenses`.
-    `edit_expense` and `delete_expense` take the ID instead of a list position, so a
-    target cannot shift during a batch or after a date edit.
+  Fix (decided 8 Oct 2026):
+  - Give each expense a short immutable ID at creation and make it the sort key:
+    `EXPENSE#<id>`, four characters from an alphabet without look-alikes, generated at
+    random and written with `attribute_not_exists` so a collision retries rather than
+    overwrites. `edit_expense` and `delete_expense` take the ID instead of a list
+    position and fetch the item with one `get_item`, so a target cannot shift during a
+    batch or after a date edit. A date edit becomes a plain update, since the key no
+    longer encodes a date, and `transact_write_delete_put` leaves the edit path. The
+    creation time moves to a `created_at` attribute.
+  - The ID appears in `get_all_expenses` output, which only the model reads; the lists
+    the model writes for the user show names and numbers, not IDs.
   - Both tools also take the expected current amount and refuse when the item with that
     ID does not match. IDs alone do not stop the model copying the ID from the
     neighbouring line, which is how the clothes and curry errors happened, and the amount
@@ -1191,6 +1198,32 @@ the sender.
   - System prompt: never re-add expenses the model believes are missing; show the list
     and ask.
   - No backfill is needed while no live trip exists; archived trips keep their old shape.
+- [ ] **Default expense dates are in UTC, and the model does not know today's date.**
+  `handle_message` turns the Telegram message time — UTC — straight into `message_date`,
+  the default for `add_expense`, while `start_trip` uses Singapore time. The first
+  Tahiti expense shows the mismatch: logged at 06:57 SGT on 12 Sep, recorded as 11 Sep,
+  a day before the trip began. In Tahiti (UTC−10), anything logged after 14:00 local
+  would land on the next day. The model never sees `message_date` and the prompt never
+  states the date, so it answered "today" with "I don't have today's date" and asked for
+  dates, payment methods and categories it could have defaulted or inferred. Fix
+  (decided 8 Oct 2026):
+  - A time zone per trip. `start_trip` takes an IANA `timezone` (the model maps "Tahiti"
+    to `Pacific/Tahiti`; `zoneinfo` validates it), stored on `TRIP#ACTIVE`; if the
+    user names no place, the bot asks once. A new `set_trip_timezone` tool handles "I'm
+    in Seoul now"
+  - `handle_message` passes the full message timestamp (`message_time`, UTC ISO-8601) —
+    the message's own time, not the processing time, so a delayed or redelivered update
+    keeps its day. `check_trip_status` converts it once into `local_date` in the trip's
+    zone (Singapore when no trip is active) and writes it to state
+  - `get_system_prompt` ends with "Today is Monday, 14 September 2026
+    (Pacific/Tahiti)." — after the stable prefix, so it does not break caching
+    (Phase 6). No tool: the prompt is rebuilt on every model call, and a tool would cost
+    an extra round trip. Time of day is left out until something needs it
+  - `add_expense` defaults to `local_date`, the same value the model was told
+  - Prompt rules: never ask for the date — omit it for today and resolve "yesterday" or
+    "Tuesday" from the date line; always infer the category and ask only when genuinely
+    unsure; default the payment method to Card (the tool's default changes from Cash)
+    and do not ask
 - [ ] **Telegram redelivers updates the bot was slow to acknowledge.** The HTTP API waits
   at most 30 s for the Lambda, then returns 503, and Telegram treats that as undelivered
   and sends the update again — to a fresh invocation that processes it from the start.
@@ -1203,14 +1236,27 @@ the sender.
     keyboard-removal claim stopped it, so nothing ran twice
 
   A retried "add expense" would record the expense twice. Adds take ~10 s today, but turn
-  time grows with the history (Phase 6). Fix:
-  - Deduplicate on `update_id`: a conditional put of `UPDATE#<update_id>` with a short
-    TTL before processing; an update whose marker already exists is acknowledged and
-    dropped
-  - Acknowledge within the limit: return 200 at once and process the update
-    asynchronously (an asynchronous self-invoke, or an SQS queue between the gateway and
-    the bot), so slow turns no longer trigger redelivery at all. Deduplication is still
-    needed, since Telegram can redeliver for other reasons
+  time grows with the history (Phase 6). Fix (decided 8 Oct 2026):
+  - Deduplicate on `update_id`, which Telegram assigns uniquely to every incoming update
+    — messages and button taps alike — and repeats unchanged on a redelivery. As the
+    first step of handling any update, a conditional put of `PK=UPDATE#<update_id>`,
+    `SK=MARKER` with a one-day `ttl`; if the marker already exists the update is a
+    redelivery, acknowledged with 200 and dropped before any model call. A separate item
+    from the expense key: one update can create several expenses, and most create none.
+    The message timestamp is unusable as the key — Telegram sends it to the second, so
+    two messages in the same second would collide, and a button tap carries the time of
+    the message it belongs to. At-most-once is deliberate: if the first run crashes
+    midway the redelivery is dropped too, and a lost message is visible (no reply) where
+    a duplicate expense is silent
+  - Shorten turns rather than restructure, first: the context bound in Phase 6 should
+    bring most turns well under the 30 s limit. Deduplication alone still lets a slow
+    turn show the generic error before its real reply arrives
+  - Deferred unless slow turns or concurrent-turn clashes persist after that: return 200
+    at once and process through an SQS FIFO queue (Lambda event source mapping, message
+    group = chat ID, deduplication ID = `update_id`). That removes the 30 s limit and
+    serialises each chat's turns, which would also fix the concurrent-turn item below.
+    Expected to sit inside SQS's free tier of 1M requests a month; the poller's idle
+    request rate is unverified and would be read from SQS metrics after deploying
 - [ ] **Concurrent turns share one checkpoint thread.** Two members messaging at the same
   time produce two Lambda invocations against the same `thread_id`, each reading and
   writing the whole conversation state. Expense data is unaffected — the tools write to
