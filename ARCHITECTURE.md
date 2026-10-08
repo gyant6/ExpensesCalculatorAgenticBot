@@ -1141,12 +1141,46 @@ uv run pre-commit run --all-files
   from the next chunk and no chunk is empty; every chunk is at most 4096 characters and
   joining them loses no non-newline text
 
-### Phase 4 — Shared-ledger correctness (future)
+### Phase 4 — Ledger correctness (future)
 
-Consequences of scoping the ledger to the chat rather than the sender. None is urgent for
-a couple of people being careful, but each is a silent failure rather than a loud one, so
-they are recorded before anyone relies on a group for a real trip.
+Failures that change the wrong expense, or lose context, without any error — so the user
+only finds out from a wrong total. The first item was observed three times on the Tahiti
+trip (Sep 2026); the rest are consequences of scoping the ledger to the chat rather than
+the sender.
 
+- [ ] **Edits and deletes hit the wrong expense.** Observed on the September trip by reading
+  the full group history against the exported CSV:
+  - *Batched date edits* ("change 13-15 to 13 Sep", then "change 9-12 to 12 Sep"). A
+    date edit rewrites the expense's SK, which is what the list is sorted by, so the
+    expense moves and every later position in the batch points elsewhere. Seven rows
+    ended up wrong.
+  - *Picking the neighbouring line*. "Change the clothes to shopping" edited the Teacup
+    one line above it, and "edit curry to 32.19" turned the poke bowl beside it into
+    a second Curry. Neither involved a date edit or a second member.
+  - *Every edit renames.* `summary` is a required parameter of `edit_expense`, so the
+    model always passes the name of the expense it meant to edit, and a misdirected edit
+    relabels the wrong row. The damage then looks like a duplicate rather than an error.
+  - *The model's repair compounds it.* Asked to restore the list, it re-added expenses
+    from memory (double-counting three and inventing a second Coffee coffee) and
+    reported "All restored!" without checking anything.
+
+  Fix:
+  - Give each expense a short immutable ID at creation, printed in `get_all_expenses`.
+    `edit_expense` and `delete_expense` take the ID instead of a list position, so a
+    target cannot shift during a batch or after a date edit.
+  - Both tools also take the expected current amount and refuse when the item with that
+    ID does not match. IDs alone do not stop the model copying the ID from the
+    neighbouring line, which is how the clothes and curry errors happened, and the amount
+    differed in every observed case (19.08 vs 4.9, 30.7 vs 29.38). An amount rather than
+    the name, because numbers are transcribed exactly where names drift in case and
+    punctuation, and a false refusal costs a retry, never data.
+  - Make `summary` optional in `edit_expense`, changed only when the user asks.
+  - Sort `get_all_expenses` by `date`, then creation time, so the numbering the user sees
+    is chronological. Today date-edited items sort by their rewritten SK and creation-time
+    items by when they were added, so 13 Sep items appeared after 14 Sep ones.
+  - System prompt: never re-add expenses the model believes are missing; show the list
+    and ask.
+  - No backfill is needed while no live trip exists; archived trips keep their old shape.
 - [ ] **Concurrent turns share one checkpoint thread.** Two members messaging at the same
   time produce two Lambda invocations against the same `thread_id`, each reading and
   writing the whole conversation state. Expense data is unaffected — the tools write to
