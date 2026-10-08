@@ -896,7 +896,6 @@ default-groups = ["dev", "charts"]
 - [x] `config.py` with pydantic-settings
 - [x] Storage layer: `dynamodb.py` — low-level DynamoDB client wrapper
 - [x] Tool implementations (trip, expenses, fx rate)
-- [ ] Unit tests for all tools and storage layer (moto + respx); coverage ≥ 80%
 - [ ] Integration tests against DynamoDB Local
 - [x] LangGraph graph: state, agent node, tools node, DynamoDB checkpointer
 - [x] System prompt engineering
@@ -905,7 +904,6 @@ default-groups = ["dev", "charts"]
 - [x] Clear conversation history when a trip ends: `graph.checkpointer.delete_thread(thread_id)`, called from `handle_callback` and `dev_runner` after the summary and attachments have been delivered. It cannot live inside `end_trip` — `agent_node` writes the summary after the tool returns and needs the message history to do it. Wrap it so a failed deletion cannot fail the user's turn after they already have their summary
 - [x] `enable_checkpoint_compression=True` on `DynamoDBSaver`, which gzips each snapshot before writing and expands it on read (measured ~4.6x). Reduces DynamoDB read and write units only — the state reaching Bedrock is decompressed and identical, so token cost is unchanged
 - [x] `ttl_seconds` on `DynamoDBSaver`, plus TTL enabled on the table itself, so abandoned threads expire with no active code path required
-- [ ] Prune checkpoint versions within a long trip: `checkpointer.prune([thread_id], strategy="keep_latest")` retains only the most recent checkpoint per namespace. Bounds storage but not token cost — the retained checkpoint still holds the full `messages` list
 - [x] Validate and upper-case `LOG_LEVEL` at settings load, so an invalid value fails with a message naming the setting and the accepted levels rather than a bare `ValueError` raised inside the logging module at import
 - [x] Paginate `query_by_prefix` via the boto3 paginator: a DynamoDB `query` returns at most 1 MB per call, and ignoring `LastEvaluatedKey` silently returned a partial list beyond that. Covered by a unit test that crosses the real 1 MB boundary — moto enforces the same cap, and a single query returned only 83 of 120 padded items
 - [x] Store `amount` as a DynamoDB Number rather than String, using `Decimal` because boto3 refuses Python floats. Makes it numerically comparable and stops every consumer re-parsing it
@@ -1022,10 +1020,22 @@ to a REST API later means replacing the gateway and re-running `setWebhook`.
 
 #### Step 6 — Security hardening
 - [x] Webhook secret token: set `secret_token` at `setWebhook` registration; validate `X-Telegram-Bot-Api-Secret-Token` header in handler before processing (done in Step 5 — brought forward because the endpoint was exposed before this step)
-- [ ] API Gateway resource policy: IP allowlist from Telegram's published CIDR ranges ([cidr.txt](https://core.telegram.org/resources/cidr.txt))
-- [ ] CIDR updater Lambda + EventBridge weekly schedule (keeps IP allowlist in sync with Telegram's published ranges)
-- [ ] IAM role for CIDR updater scoped to `apigateway:UpdateRestApiPolicy` on the webhook API ARN only
 - [ ] CloudWatch structured logging validation
+
+  *Dropped:* the IP allowlist from Telegram's published CIDR ranges, with its weekly
+  updater Lambda and `apigateway:UpdateRestApiPolicy` role. All three assumed a REST API
+  resource policy, and the webhook is an HTTP API, which has none (Step 5). The secret
+  token already rejects forged deliveries. An allowlist would now mean either moving to a
+  REST API — replacing the gateway and re-running `setWebhook` — or putting AWS WAF in
+  front of it, and neither is justified while the token check holds
+
+#### Step 9 — Data protection
+- [ ] Enable DynamoDB point-in-time recovery on the table (`point_in_time_recovery { enabled = true }`
+  in `main.tf`): restores the table to any second in the last 35 days. The trip archive
+  only covers ending a trip; nothing today recovers from a bad edit or delete mid-trip,
+  which the September trip showed is not hypothetical (Phase 4). A restore creates a new
+  table, so the runbook needs a short entry on restoring and switching
+  `DYNAMODB_TABLE_NAME` to it
 
 #### Step 7 — Bedrock Guardrails
 - [ ] Denied topics policy: block off-topic requests (financial advice, general chat) and keep the agent scoped to expense tracking
@@ -1181,6 +1191,26 @@ the sender.
   - System prompt: never re-add expenses the model believes are missing; show the list
     and ask.
   - No backfill is needed while no live trip exists; archived trips keep their old shape.
+- [ ] **Telegram redelivers updates the bot was slow to acknowledge.** The HTTP API waits
+  at most 30 s for the Lambda, then returns 503, and Telegram treats that as undelivered
+  and sends the update again — to a fresh invocation that processes it from the start.
+  Observed twice in the logs:
+  - 29 Sep, "show all expenses": the gateway log shows `status 503, responseLatency
+    30003`, followed by a second invocation (with its own cold start) for the same
+    message. The user got both the generic error and the list
+  - 7 Oct, the September trip end: the invocation ran 34.5 s, and the "duplicate end_trip
+    confirmation" logged two seconds later was Telegram's retry, not a second tap. The
+    keyboard-removal claim stopped it, so nothing ran twice
+
+  A retried "add expense" would record the expense twice. Adds take ~10 s today, but turn
+  time grows with the history (Phase 6). Fix:
+  - Deduplicate on `update_id`: a conditional put of `UPDATE#<update_id>` with a short
+    TTL before processing; an update whose marker already exists is acknowledged and
+    dropped
+  - Acknowledge within the limit: return 200 at once and process the update
+    asynchronously (an asynchronous self-invoke, or an SQS queue between the gateway and
+    the bot), so slow turns no longer trigger redelivery at all. Deduplication is still
+    needed, since Telegram can redeliver for other reasons
 - [ ] **Concurrent turns share one checkpoint thread.** Two members messaging at the same
   time produce two Lambda invocations against the same `thread_id`, each reading and
   writing the whole conversation state. Expense data is unaffected — the tools write to
@@ -1199,6 +1229,11 @@ the sender.
 - [ ] Receipt image parsing (user sends photo, agent extracts expense via vision)
 - [ ] Budget alerts (warn user when spending exceeds a threshold)
 - [ ] FX rate caching per day (avoid redundant API calls for same currency on same day)
+- [ ] Reply to messages the bot cannot read. Photos, videos, voice notes and documents
+  match no handler (`filters.TEXT` only), so they get no reply at all — including a photo
+  whose caption says "lunch 12", since a caption is not `message.text`. A handler on those
+  types replying "I can only read text for now — tell me the amount and I'll log it" turns
+  the silence into an answer. Superseded for photos once receipt parsing lands
 
 ### Phase 6 — Model, context and cost (future)
 
@@ -1226,6 +1261,13 @@ own Claude prices were not verified, as its pricing page renders those tables cl
     prefix every turn, so cache only the fixed part, not the history
   - Verify with the same CloudWatch metrics: `InputTokenCount` per call should plateau,
     and `CacheReadInputTokenCount` should become non-zero
+- [ ] **Prune checkpoint versions during a trip.** The checkpointer keeps every version of
+  the thread until the trip ends, and `clear_thread_history` then deletes them all: 14.8 s
+  of the 34.5 s September trip end, enough to push that invocation past the gateway's 30 s
+  limit (Phase 4, redelivery). `checkpointer.prune([thread_id], strategy="keep_latest")`
+  after each turn keeps only the latest version. It bounds storage and the end-of-trip
+  delete, not token cost — the retained checkpoint still holds the full message list,
+  which the context bound above addresses
 - [ ] **Move the chat model to Claude Haiku 5.5.** `global.anthropic.claude-haiku-5-5` is
   ACTIVE in ap-southeast-1 (checked 8 Oct 2026). List price $0.10 / $0.50 per MTok for
   prompts up to 100K tokens and $0.50 / $2.50 above, against $1 / $5 for Haiku 4.5; the
@@ -1267,3 +1309,29 @@ own Claude prices were not verified, as its pricing page renders those tables cl
   - Same request changes as Haiku 5.5 (no `temperature`, adaptive thinking, refusal
     handling), plus a second model ID in Terraform and its own IAM grant, since the
     current grant is derived from the single chat model
+
+### Phase 7 — Environments (future)
+
+- [ ] **UAT environment on AWS.** Everything today is tested in production or against
+  DynamoDB Local. A UAT stack should mirror production — same Terraform, same services —
+  so that what passes there predicts production. Two shapes, decision pending:
+  - *Same account, second stack*: an `environment` variable prefixing every resource
+    name, its own table, Lambdas and SSM paths, its own state key in the state bucket, and
+    a second Telegram bot from BotFather. Cheapest; shares the account's IAM and quotas
+  - *Separate AWS account* (recommended): the same stack in its own account under AWS
+    Organizations. Full isolation; `allowed_account_ids` already supports one config per
+    account
+- [ ] **Azure — decision pending.** The goal is learning a second cloud, not testing this
+  bot: an Azure UAT would run different storage, secrets, model and entry-point code, so
+  its results would not transfer to production. Eleven of the twenty-one source files
+  call an AWS service directly (DynamoDB, the DynamoDB checkpointer, Bedrock through
+  `langchain-aws`, SSM, the API Gateway event shape, the chart Lambda invoke, and
+  `botocore` exceptions). Options under consideration:
+  - Port the bot as a second deployment target: put each AWS dependency behind an
+    interface with an AWS and an Azure implementation (Functions, Key Vault, a database
+    with a LangGraph checkpointer, Claude on Microsoft Foundry), production staying on
+    AWS. Unverified: LangChain's support for Foundry, and a LangGraph checkpointer for
+    Cosmos DB (one exists for PostgreSQL)
+  - Learn Azure on separate small projects instead — a daily FX-rate function serving
+    this bot (Phase 5), a receipt reader on Document Intelligence, a past-trips dashboard
+    on Static Web Apps
