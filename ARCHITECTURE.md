@@ -1220,6 +1220,17 @@ the sender.
     (Phase 6). No tool: the prompt is rebuilt on every model call, and a tool would cost
     an extra round trip. Time of day is left out until something needs it
   - `add_expense` defaults to `local_date`, the same value the model was told
+  - Storage keeps two kinds of time apart. Moments (`created_at`, `updated_at`) stay
+    UTC ISO-8601 timestamps. The expense `date` stays a plain `YYYY-MM-DD` calendar day
+    with no time or zone — the day as lived, in the trip's zone; converting a calendar
+    day to UTC has no meaning. Each expense also stores the IANA `timezone` its `date`
+    was taken in, so a trip that moves between zones remains interpretable from the data
+    alone. Example: a message at 02:51 UTC on 15 Sep from Tahiti is stored with
+    `date: "2026-09-14"`, `timezone: "Pacific/Tahiti"`, `created_at:
+    "2026-09-15T02:51:03…+00:00"` — today's code stores `date: "2026-09-15"`
+  - The one time-zone conversion happens in code, in `check_trip_status`. The model
+    never converts zones: it is given the local date and only does date arithmetic
+    from it ("yesterday", "Saturday")
   - Prompt rules: never ask for the date — omit it for today and resolve "yesterday" or
     "Tuesday" from the date line; always infer the category and ask only when genuinely
     unsure; default the payment method to Card (the tool's default changes from Cash)
