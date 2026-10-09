@@ -246,6 +246,17 @@ def test_main_deploys_when_the_account_matches(
     assert deployed["args"][2:] == ("bkt", "BotFn", archive)
 
 
+def test_main_with_no_targets_deploys_the_bot(
+    monkeypatch: pytest.MonkeyPatch, archive: Path
+) -> None:
+    # The bare command is the everyday one; argparse rejected its own list default
+    # before this was applied after parsing instead.
+    deployed = _patch_main(monkeypatch, archive, account="111122223333")
+
+    assert deploy.main([]) == 0
+    assert deployed["args"][2:] == ("bkt", "BotFn", archive)
+
+
 def test_main_stops_when_an_archive_is_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -56,6 +56,8 @@ TARGETS: Final = {
     "bot": ("lambda_function_name", REPO_ROOT / "function.zip"),
     "charts": ("chart_lambda_function_name", REPO_ROOT / "chart_function.zip"),
 }
+# The bot changes with almost every release; the chart function rarely does.
+_DEFAULT_TARGET: Final = "bot"
 
 # 8 MB parts, each retried on its own: a dropped connection costs one part, not the
 # whole upload.
@@ -220,19 +222,21 @@ def deploy_function(
 def main(argv: list[str] | None = None) -> int:
     """Deploy the requested functions; see the module docstring for behaviour."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # No default here: with nargs="*", argparse checks a list default against `choices`
+    # as a whole and rejects it, so the default is applied after parsing instead.
     parser.add_argument(
         "targets",
         nargs="*",
         choices=sorted(TARGETS),
-        default=["bot"],
-        help="Functions to deploy (default: bot).",
+        help=f"Functions to deploy (default: {_DEFAULT_TARGET}).",
     )
     parser.add_argument("--profile", help="AWS profile; see the module docstring.")
     args = parser.parse_args(argv)
+    targets: list[str] = args.targets or [_DEFAULT_TARGET]
 
     try:
         outputs = read_terraform_outputs()
-        archives = {target: TARGETS[target][1] for target in args.targets}
+        archives = {target: TARGETS[target][1] for target in targets}
         absent = [str(path) for path in archives.values() if not path.is_file()]
         if absent:
             raise DeployError(
