@@ -55,7 +55,8 @@ def _get(expense_id: str) -> dict[str, Any] | None:
 def _add(**overrides: Any) -> str:
     payload: dict[str, Any] = {
         "ledger_id": LEDGER,
-        "message_date": "2026-01-30",
+        "local_date": "2026-01-30",
+        "trip_timezone": "America/Los_Angeles",
         "source_message": "Breakfast at Yakun $6.13",
         "summary": "Breakfast at Yakun",
         "category": "Food",
@@ -108,7 +109,7 @@ def test_add_expense_records_under_its_id(dynamodb_table: DynamoDBClient) -> Non
         patch.object(expenses, "_new_expense_id", return_value="k7qm"),
         patch.object(expenses, "_now_utc", return_value=NOW),
     ):
-        output = _add(payment_method="Card")
+        output = _add(payment_method="Cash")
 
     assert output == "Expense recorded with id k7qm."
     assert _get("k7qm") == {
@@ -120,24 +121,26 @@ def test_add_expense_records_under_its_id(dynamodb_table: DynamoDBClient) -> Non
         "amount": Decimal("6.13"),
         "currency": "SGD",
         "date": "2026-01-30",
-        "payment_method": "Card",
+        "timezone": "America/Los_Angeles",
+        "payment_method": "Cash",
         "created_at": NOW,
         "updated_at": NOW,
     }
 
 
-def test_add_expense_defaults_payment_method_to_cash(
+def test_add_expense_defaults_payment_method_to_card(
     dynamodb_table: DynamoDBClient,
 ) -> None:
+    # Nearly every expense on the September trip was by card, and the bot kept asking.
     with patch.object(expenses, "_new_expense_id", return_value="k7qm"):
         _add()
 
     item = _get("k7qm")
     assert item is not None
-    assert item["payment_method"] == "Cash"
+    assert item["payment_method"] == "Card"
 
 
-def test_add_expense_without_a_date_uses_the_message_date(
+def test_add_expense_without_a_date_uses_the_trip_local_date(
     dynamodb_table: DynamoDBClient,
 ) -> None:
     with patch.object(expenses, "_new_expense_id", return_value="k7qm"):
@@ -146,6 +149,7 @@ def test_add_expense_without_a_date_uses_the_message_date(
     item = _get("k7qm")
     assert item is not None
     assert item["date"] == "2026-01-30"
+    assert item["timezone"] == "America/Los_Angeles"
 
 
 def test_add_expense_retries_a_colliding_id_without_overwriting(

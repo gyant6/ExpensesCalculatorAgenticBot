@@ -10,14 +10,11 @@ Usage:
 """
 
 import argparse
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
-
-SGT = ZoneInfo("Asia/Singapore")
 
 
 def run(user_id: str) -> None:
@@ -73,12 +70,13 @@ def run(user_id: str) -> None:
                 )
                 result = graph.invoke(None, config)
         else:
-            message_date = datetime.now(SGT).strftime("%Y-%m-%d")
+            # UTC, as Telegram sends it; the graph converts to the trip's local day.
+            message_time = datetime.now(timezone.utc).isoformat()
             result = graph.invoke(
                 {
                     "messages": [HumanMessage(content=user_input)],
                     "ledger_id": user_id,
-                    "message_date": message_date,
+                    "message_time": message_time,
                 },
                 config,
             )

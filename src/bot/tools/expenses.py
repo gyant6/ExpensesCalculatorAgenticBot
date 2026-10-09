@@ -145,21 +145,24 @@ def _load_for_change(
 @tool
 def add_expense(
     ledger_id: Annotated[str, InjectedState("ledger_id")],
-    message_date: Annotated[str, InjectedState("message_date")],
+    local_date: Annotated[str, InjectedState("local_date")],
+    trip_timezone: Annotated[str, InjectedState("trip_timezone")],
     source_message: str,
     summary: str,
     category: str,
     amount: str,
     currency: str,
     date: str | None = None,
-    payment_method: str = "Cash",
+    payment_method: str = "Card",
 ) -> str:
     """Record a new expense for the user in DynamoDB.
 
     Call this when the user describes an expense — e.g. "spent $12 on lunch", "paid 500 yen
-    for dinner", "bought a train ticket for $3.20". Extract date from the user's message if
-    explicitly mentioned (e.g. "on Tuesday", "14 June"); otherwise fall back to the Telegram
-    message date available in agent state. Do not guess or use today's date as a default.
+    for dinner", "bought a train ticket for $3.20". If the user names no date, leave date
+    out: it defaults to today in the trip's time zone. For a relative date ("yesterday",
+    "on Tuesday") work out the calendar date from today's date in your instructions.
+    Never ask the user for a date. Always infer the category from what was bought, and
+    ask only when it is genuinely unclear.
 
     The result includes the new expense's id. Keep it for a follow-up edit in the same
     conversation (e.g. "it was by card"), but never show it to the user.
@@ -172,10 +175,10 @@ def add_expense(
             "Shopping", "Flight", "Insurance", "Leisure", "Misc".
         amount: Expense amount as a string (e.g. '12.50'). Must be a positive number.
         currency: ISO 4217 currency code (e.g. 'SGD', 'JPY', 'USD').
-        date: Date the expense occurred in YYYY-MM-DD format (e.g. '2026-06-14'). Use the
-            date explicitly mentioned by the user or None if the user does not specify it.
+        date: Date the expense occurred in YYYY-MM-DD format (e.g. '2026-06-14'), when the
+            user named one; None for today.
         payment_method: How the expense was paid (e.g. 'Cash', 'Card', 'PayNow').
-            If the payment method is not mentioned, fall back to 'Cash'.
+            If the payment method is not mentioned, use 'Card' and do not ask.
 
     Returns:
         A confirmation string with the expense's id, or an error string describing what
@@ -187,7 +190,7 @@ def add_expense(
             produce.
     """
     if date is None:
-        date = message_date
+        date = local_date
     if not _is_valid_date(date):
         return _INVALID_DATE
     if not check_valid_amount(amount):
@@ -208,6 +211,9 @@ def add_expense(
                 "amount": Decimal(amount),
                 "currency": currency,
                 "date": date,
+                # The zone `date` is a calendar day in, so a trip that moves between
+                # zones stays interpretable from the data alone.
+                "timezone": trip_timezone,
                 "payment_method": payment_method,
                 "created_at": now,
                 "updated_at": now,

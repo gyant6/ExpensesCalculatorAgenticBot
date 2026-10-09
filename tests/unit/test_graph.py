@@ -13,7 +13,7 @@ def _state(*messages: AnyMessage) -> AgentState:
     return AgentState(
         messages=list(messages),
         ledger_id="111",
-        message_date="2026-01-01",
+        message_time="2026-01-01T00:00:00+00:00",
     )
 
 

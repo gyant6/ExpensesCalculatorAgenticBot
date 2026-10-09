@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
-from zoneinfo import ZoneInfo
 
 import httpx
 from langchain_core.tools import tool
@@ -13,6 +12,7 @@ from pydantic import ValidationError
 from src.bot.config import settings
 from src.bot.export import generate_csv
 from src.bot.storage import dynamodb
+from src.bot.timezones import describe_date, is_valid_timezone, local_date
 from src.bot.tools.expenses import list_expenses
 from src.bot.tools.fx import get_sgd_exchange_rates
 
@@ -37,39 +37,87 @@ FX_UNAVAILABLE_NOTICE = (
 )
 
 
+def _invalid_timezone(name: str) -> str:
+    """Error string for a time zone name zoneinfo does not recognise."""
+    return (
+        f"{name!r} is not a valid IANA time zone name. Use a name such as "
+        "'Asia/Tokyo', 'Europe/London' or 'America/Los_Angeles'."
+    )
+
+
 @tool
 def start_trip(
     ledger_id: Annotated[str, InjectedState("ledger_id")],
+    message_time: Annotated[str, InjectedState("message_time")],
+    timezone: str,
 ) -> str:
-    """Start a new overseas trip for the user.
+    """Start a new overseas trip for the user, in the time zone they are travelling to.
 
-    Creates a TRIP#ACTIVE marker in DynamoDB recording the start date. Only one
-    trip can be active at a time. Call this when the user says they are starting
-    a trip, going travelling, or similar.
+    Creates a TRIP#ACTIVE marker recording the start date and the trip's time zone. Only
+    one trip can be active at a time. Call this when the user says they are starting a
+    trip, going travelling, or similar. If they have not said where they are going, ask
+    once before calling this — the time zone decides which day every expense lands on.
 
     Args:
-        ledger_id: The Telegram user ID of the user starting the trip.
+        timezone: IANA time zone name of where the user is travelling, e.g. 'Asia/Tokyo'
+            for Japan or 'America/Los_Angeles' for California.
 
     Returns:
-        A confirmation string with the start date, or an error string if a trip
-        is already active.
+        A confirmation with the start date and time zone, or an error string if a trip
+        is already active or the time zone name is not valid.
 
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     if dynamodb.get_item(f"USER#{ledger_id}", "TRIP#ACTIVE"):
         return "There is already an active trip."
+    if not is_valid_timezone(timezone):
+        return _invalid_timezone(timezone)
 
-    start_date = (datetime.now(tz=ZoneInfo("Asia/Singapore"))).strftime("%Y-%m-%d")
+    start_date = local_date(message_time, timezone)
     dynamodb.put_item(
         {
             "PK": f"USER#{ledger_id}",
             "SK": "TRIP#ACTIVE",
             "start_date": start_date,
+            "timezone": timezone,
         }
     )
+    return f"New trip started on {start_date} ({timezone})."
 
-    return f"New trip started on {start_date}."
+
+@tool
+def set_trip_timezone(
+    ledger_id: Annotated[str, InjectedState("ledger_id")],
+    message_time: Annotated[str, InjectedState("message_time")],
+    timezone: str,
+) -> str:
+    """Change the active trip's time zone when the user moves somewhere new.
+
+    Call this when the user says they are now somewhere with a different time zone —
+    e.g. "I'm in Seoul now", "we've landed in London". Expenses already recorded keep
+    their dates; new ones, and "today" from now on, follow the new zone.
+
+    Args:
+        timezone: IANA time zone name of where the user now is, e.g. 'Asia/Seoul'.
+
+    Returns:
+        A confirmation with today's date in the new zone, or an error string if no trip
+        is active or the time zone name is not valid.
+
+    Raises:
+        botocore.exceptions.ClientError: If the DynamoDB request fails, including when
+            the trip is ended between being read and being updated.
+    """
+    if not is_valid_timezone(timezone):
+        return _invalid_timezone(timezone)
+    pk = f"USER#{ledger_id}"
+    if dynamodb.get_item(pk, "TRIP#ACTIVE") is None:
+        return "There is no active trip. Start a trip first."
+
+    dynamodb.update_item(pk, "TRIP#ACTIVE", {"timezone": timezone})
+    today = describe_date(local_date(message_time, timezone))
+    return f"Time zone set to {timezone}. Today there is {today}."
 
 
 def _archive_trip(pk: str, start_date: str, expenses: list[dict[str, Any]]) -> None:

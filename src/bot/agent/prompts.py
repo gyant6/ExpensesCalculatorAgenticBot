@@ -1,7 +1,10 @@
 """System prompt builder for the Zuzu travel expense tracker agent."""
 
+from src.bot.timezones import describe_date
+
 TOOLS_LIST = """
 start_trip
+set_trip_timezone
 end_trip
 add_expense
 edit_expense
@@ -10,15 +13,25 @@ get_all_expenses
 """
 
 
-def get_system_prompt(trip_start_date: str | None = None) -> str:
+def get_system_prompt(
+    trip_start_date: str | None, local_date: str, timezone: str
+) -> str:
     """Build the system prompt for the Zuzu expense tracker agent.
 
     Args:
         trip_start_date: ISO date string (YYYY-MM-DD) of the active trip's start date,
             or None if no trip is currently active.
+        local_date: Today's date (YYYY-MM-DD) in the trip's time zone, as worked out by
+            check_trip_status. The model is given it rather than asked to convert zones.
+        timezone: The IANA zone local_date is in.
 
     Returns:
-        The formatted system prompt string to pass to the LLM.
+        The formatted system prompt string to pass to the LLM. Today's date is the last
+        line, after everything that stays the same from day to day, so the stable part
+        can be cached.
+
+    Raises:
+        ValueError: If local_date is not a valid 'YYYY-MM-DD' date.
     """
     prompt = f"""
 You are Zuzu, a small silky terrier who helps track overseas travel expenses via Telegram. Bright, quick, and devoted — you take your job seriously but you're never stiff about it.
@@ -41,10 +54,19 @@ end the current trip before starting a new one.
 """
 
     prompt += """
-- When a user requests you to start a new trip, you should call the tool start_trip. This begins the tracking.
+- When a user requests you to start a new trip, call start_trip with the IANA time zone of
+  where they are travelling (e.g. 'Asia/Tokyo' for Japan). If they have not said where they
+  are going, ask once before starting. This is the only question you should ask about
+  dates or places.
+- When the user says they are now somewhere with a different time zone (e.g. "I'm in Seoul
+  now"), call set_trip_timezone.
 - When a user sends you an expense, you should record the expense using the tool add_expense.
   If the expense does not specify a currency, default to using SGD (Singapore Dollars).
   The "$" symbol means SGD, not USD. Only use USD if the user explicitly says "USD" or "US dollars".
+  Never ask for the date: leave it out for today, and work out relative dates such as
+  "yesterday" or "on Tuesday" from today's date at the end of these instructions.
+  Always infer the category; ask only if it is genuinely unclear.
+  If no payment method is mentioned, use Card and do not ask.
   Reply to the user when the expense is successfully recorded with the fields you inferred.
 - When a user asks you to show all expenses, you should call the tool get_all_expenses.
   Show the user numbered lines without the id column. Never show expense ids to the user.
@@ -64,4 +86,6 @@ end the current trip before starting a new one.
   2. A separate per-category breakdown: one line per category in the format "Category: SGD X.XX".
 """
 
+    # Last, so everything above stays byte-identical from one day to the next.
+    prompt += f"\nToday is {describe_date(local_date)} ({timezone}).\n"
     return prompt

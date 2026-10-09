@@ -470,7 +470,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not authorised:
         return
 
-    message_date = update.message.date.strftime("%Y-%m-%d")
+    # The message's own UTC timestamp, whole. check_trip_status converts it into the
+    # trip's local day; formatting it as a date here would fix the day in UTC.
+    message_time = update.message.date.isoformat()
     config = _config(ledger_id)
 
     with _timed(timings, "state"):
@@ -490,7 +492,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             {
                 "messages": [HumanMessage(content=update.message.text)],
                 "ledger_id": ledger_id,
-                "message_date": message_date,
+                "message_time": message_time,
             },
             config,
         )

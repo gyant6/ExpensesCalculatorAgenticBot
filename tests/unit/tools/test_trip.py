@@ -22,18 +22,54 @@ TELEGRAM_USER_ID = "123456"
 CSV_HEADER = ",".join(CSV_FIELDNAMES)
 
 
-def test_start_trip_creates_active_trip(dynamodb_table: DynamoDBClient) -> None:
-    mock_datetime = datetime(2025, 12, 20)
-    with patch("src.bot.tools.trip.datetime") as mock_dt:
-        mock_dt.now.return_value = mock_datetime
-        tool_output = trip.start_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+# 02:51 UTC on 15 Sep is still the evening of 14 Sep in Los Angeles (UTC−7).
+MESSAGE_TIME = "2026-09-15T02:51:00+00:00"
+
+
+def _start(timezone: str) -> str:
+    return str(
+        trip.start_trip.invoke(
+            {
+                "ledger_id": TELEGRAM_USER_ID,
+                "message_time": MESSAGE_TIME,
+                "timezone": timezone,
+            }
+        )
+    )
+
+
+def _set_zone(timezone: str) -> str:
+    return str(
+        trip.set_trip_timezone.invoke(
+            {
+                "ledger_id": TELEGRAM_USER_ID,
+                "message_time": MESSAGE_TIME,
+                "timezone": timezone,
+            }
+        )
+    )
+
+
+def test_start_trip_records_the_local_start_date_and_zone(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    tool_output = _start("America/Los_Angeles")
 
     pk = f"USER#{TELEGRAM_USER_ID}"
-    sk = "TRIP#ACTIVE"
-    mock_datetime_str = mock_datetime.strftime("%Y-%m-%d")
-    record = dynamodb.get_item(pk, sk)
-    assert record == {"PK": pk, "SK": sk, "start_date": mock_datetime_str}
-    assert tool_output == f"New trip started on {mock_datetime_str}."
+    assert dynamodb.get_item(pk, "TRIP#ACTIVE") == {
+        "PK": pk,
+        "SK": "TRIP#ACTIVE",
+        "start_date": "2026-09-14",
+        "timezone": "America/Los_Angeles",
+    }
+    assert tool_output == "New trip started on 2026-09-14 (America/Los_Angeles)."
+
+
+def test_start_trip_rejects_an_unknown_time_zone(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    assert "not a valid IANA time zone" in _start("Hawai/Somewhere")
+    assert dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", "TRIP#ACTIVE") is None
 
 
 def test_start_trip_returns_error_when_trip_already_active(
@@ -47,8 +83,42 @@ def test_start_trip_returns_error_when_trip_already_active(
         }
     )
 
-    tool_output = trip.start_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
-    assert tool_output == "There is already an active trip."
+    assert _start("Asia/Tokyo") == "There is already an active trip."
+
+
+def test_set_trip_timezone_moves_the_active_trip(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _start("America/Los_Angeles")
+
+    tool_output = _set_zone("Asia/Seoul")
+
+    record = dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", "TRIP#ACTIVE")
+    assert record is not None
+    assert record["timezone"] == "Asia/Seoul"
+    assert record["start_date"] == "2026-09-14"
+    # 02:51 UTC on 15 Sep is 11:51 on 15 Sep in Seoul.
+    assert tool_output == (
+        "Time zone set to Asia/Seoul. Today there is Tuesday, 15 September 2026."
+    )
+
+
+def test_set_trip_timezone_without_a_trip_is_refused(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    assert _set_zone("Asia/Seoul") == "There is no active trip. Start a trip first."
+    assert dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", "TRIP#ACTIVE") is None
+
+
+def test_set_trip_timezone_rejects_an_unknown_time_zone(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _start("America/Los_Angeles")
+
+    assert "not a valid IANA time zone" in _set_zone("Mars/Olympus")
+    record = dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", "TRIP#ACTIVE")
+    assert record is not None
+    assert record["timezone"] == "America/Los_Angeles"
 
 
 def test_end_trip_with_no_expenses(dynamodb_table: DynamoDBClient) -> None:
@@ -158,7 +228,7 @@ def test_archive_is_invisible_to_the_next_trip(
     dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
     trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
 
-    trip.start_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+    _start("Asia/Seoul")
 
     assert dynamodb.query_by_prefix(pk, "EXPENSE#") == []
     assert len(dynamodb.query_by_prefix(pk, trip.ARCHIVE_SK_PREFIX)) == 1

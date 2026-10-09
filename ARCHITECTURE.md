@@ -257,31 +257,32 @@ Approving a group ID grants access to all members messaging the bot within that 
 START
   │
   ▼
-[check_trip_status]
-  │  (reads TRIP#ACTIVE from DynamoDB, sets trip_start_date in state)
-  ▼
-[agent_node] ◄────────────────────────────────────────────────┐
-  │                                                           │
-  │  custom_routes(state) inspects the last message:          │
-  │                                                           │
-  ├── not an AIMessage, or no tool_calls ─────────────► END    │
-  │                                                           │
-  ├── end_trip is the only tool call                          │
-  │        └──► [end_trip_node] ───────────────────────────────┤
-  │               interrupt_before: graph pauses here          │
-  │               before the tool executes, persists           │
-  │               state, and returns to the handler            │
-  │                                                           │
-  ├── end_trip batched with other tools                       │
-  │        └──► [end_trip_batch_error_node] ───────────────────┤
-  │               injects a rejecting ToolMessage for every    │
-  │               call in the batch, so the model retries      │
-  │               with end_trip alone                          │
-  │                                                           │
-  └── only non-end_trip tools                                 │
+[check_trip_status] ◄──────────────────────────────────────────┐
+  │  (reads TRIP#ACTIVE; sets trip_start_date, trip_timezone    │
+  │   and local_date — message_time as a day in the trip zone)  │
+  ▼                                                            │
+[agent_node] ◄─────────────────────────────────────────┐       │
+  │                                                    │       │
+  │  custom_routes(state) inspects the last message:   │       │
+  │                                                    │       │
+  ├── not an AIMessage, or no tool_calls ──► END        │       │
+  │                                                    │       │
+  ├── end_trip is the only tool call                   │       │
+  │        └──► [end_trip_node] ───────────────────────┤       │
+  │               interrupt_before: graph pauses here   │       │
+  │               before the tool executes, persists    │       │
+  │               state, and returns to the handler     │       │
+  │                                                    │       │
+  ├── end_trip batched with other tools                │       │
+  │        └──► [end_trip_batch_error_node] ───────────┘       │
+  │               injects a rejecting ToolMessage for          │
+  │               every call in the batch, so the model        │
+  │               retries with end_trip alone                  │
+  │                                                            │
+  └── only non-end_trip tools                                  │
            └──► [tools_node] ──────────────────────────────────┘
-                  start_trip, add_expense, edit_expense,
-                  delete_expense, get_all_expenses
+                  start_trip, set_trip_timezone, add_expense,
+                  edit_expense, delete_expense, get_all_expenses
 ```
 
 The batch case exists because routing a mixed batch either way loses a call silently:
@@ -290,7 +291,7 @@ The batch case exists because routing a mixed batch either way loses a call sile
 entirely. Rejecting the whole batch is the only option that neither drops a tool call nor
 deletes a trip without asking.
 
-This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls Claude Haiku with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. All three tool nodes edge back to `agent_node`, so the loop continues until Claude returns a plain message.
+This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls Claude Haiku with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. `tools_node` edges back through `check_trip_status`, so a trip started or moved to another time zone earlier in the turn — "start trip in Seoul, coffee 5" — is re-read, with its local date, before the model records the coffee; the other two tool nodes edge straight back to `agent_node`. The loop continues until Claude returns a plain message.
 
 `end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
 
@@ -308,11 +309,16 @@ class AgentState(MessagesState):
     ledger_id: str              # Whose expenses these are — the chat, not the sender. Set by
                                 # telegram_handler.py on every invocation; injected into tools
                                 # via InjectedState so the LLM never sees or supplies it
-    message_date: str           # YYYY-MM-DD date of the incoming Telegram message; set by
-                                # telegram_handler.py; used by add_expense as fallback date when
-                                # the user does not explicitly mention one
-    trip_start_date: str | None # Set by check_trip_status node; passed to system prompt so the
-                                # LLM knows whether a trip is active and when it started
+    message_time: str           # The incoming message's own timestamp, UTC ISO-8601; set by
+                                # telegram_handler.py. Its own time, not the processing time,
+                                # so a delayed or redelivered update keeps its day
+    trip_start_date: str | None # Set by check_trip_status; tells the LLM whether a trip is
+                                # active and when it started
+    trip_timezone: str          # Set by check_trip_status: the trip's IANA zone, or
+                                # Asia/Singapore when no trip is active
+    local_date: str             # Set by check_trip_status: message_time as a YYYY-MM-DD day in
+                                # trip_timezone. Given to the LLM as "Today is …" and used by
+                                # add_expense as the default date — the same value for both
 ```
 
 ### Checkpointing (Conversation Memory)
@@ -394,7 +400,7 @@ Consequences worth knowing:
 
 | PK | SK | Attributes | Description |
 |---|---|---|---|
-| `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date` | Active trip marker |
+| `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date`, `timezone` | Active trip marker; `timezone` is the trip's IANA zone, absent on trips started before zones existed |
 | `USER#<ledger_id>` | `EXPENSE#<id>` | see below | Individual expense, keyed by an immutable 4-character id |
 | `USER#<ledger_id>` | `ARCHIVE#<ended_at>` | `start_date`, `ended_at`, `expenses`, `ttl` | An ended trip's expenses, kept for `TRIP_ARCHIVE_TTL_SECONDS` (90 days) |
 | `UPDATE#<update_id>` | `MARKER` | `claimed_at`, `ttl` | A Telegram update already handled; a redelivery finding it is dropped. Expires after `UPDATE_DEDUP_TTL_SECONDS` (one day) |
@@ -414,7 +420,8 @@ Consequences worth knowing:
 | `currency` | String | `JPY` |
 | `amount` | Number (Decimal) | `1200` |
 | `summary` | String | `Dinner at Ichiran ramen` |
-| `payment_method` | String | `Cash` |
+| `payment_method` | String | `Card` |
+| `timezone` | String (IANA) | `America/Los_Angeles` — the zone `date` is a calendar day in |
 | `created_at` | String (ISO-8601, UTC) | `2026-06-04T13:45:00.000000+00:00` |
 | `updated_at` | String (ISO-8601, UTC) | `2026-06-04T13:45:00.000000+00:00` |
 
@@ -435,16 +442,21 @@ restoring one is done by hand with the AWS CLI.
 
 ## Tools
 
-All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injected from `AgentState` by the LangGraph tool node — the LLM never sees it as a parameter. `telegram_handler.py` is responsible for setting both `telegram_user_id` and `message_date` in state before invoking the graph.
+All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`, `local_date` and `trip_timezone` are injected from `AgentState` by the LangGraph tool node — the LLM never sees them as parameters. `telegram_handler.py` sets `ledger_id` and `message_time` before invoking the graph; `check_trip_status` derives the other two.
 
 ### 1. `start_trip`
-- **Input:** _(none)_
-- **Action:** Checks if `TRIP#ACTIVE` exists. If yes, returns error (only 1 active trip). Otherwise writes `TRIP#ACTIVE` item with `start_date`.
-- **Returns:** Confirmation with start date.
+- **Input:** `timezone: str` — the IANA zone of where the user is travelling. The model maps the place ("Japan" → `Asia/Tokyo`) and, if the user named none, asks once before calling.
+- **Action:** Returns an error if `TRIP#ACTIVE` exists (only one active trip) or `zoneinfo` does not recognise the zone. Otherwise writes `TRIP#ACTIVE` with `timezone` and `start_date` — `message_time` as a day in that zone.
+- **Returns:** Confirmation with the start date and zone.
+
+### 1a. `set_trip_timezone`
+- **Input:** `timezone: str` — the zone the user has moved to ("I'm in Seoul now").
+- **Action:** Validates the zone, refuses if no trip is active, and updates `TRIP#ACTIVE.timezone`. Expenses already recorded keep their dates; new ones, and the "Today is" line from the next step on, follow the new zone.
+- **Returns:** Confirmation with today's date in the new zone.
 
 ### 2. `add_expense`
-- **Input:** `source_message: str`, `summary: str`, `category: str`, `amount: str`, `currency: str`, `date: str | None = None`, `payment_method: str = "Cash"`
-- **Action:** Writes an `EXPENSE#<id>` item, where `<id>` is four random characters from an alphabet without look-alikes (`23456789abcdefghjkmnpqrstuvwxyz`). The write is conditional on the key being free, so a collision retries with a fresh id rather than overwriting; five consecutive collisions raise. Records `created_at` and `updated_at` in UTC. No FX conversion at write time. When `date` is None, falls back to `message_date` from state.
+- **Input:** `source_message: str`, `summary: str`, `category: str`, `amount: str`, `currency: str`, `date: str | None = None`, `payment_method: str = "Card"`
+- **Action:** Writes an `EXPENSE#<id>` item, where `<id>` is four random characters from an alphabet without look-alikes (`23456789abcdefghjkmnpqrstuvwxyz`). The write is conditional on the key being free, so a collision retries with a fresh id rather than overwriting; five consecutive collisions raise. Records `created_at` and `updated_at` in UTC, and the trip's `timezone`. No FX conversion at write time. When `date` is None, uses `local_date` — today in the trip's zone, the date the model was told.
 - **Returns:** `"Expense recorded with id <id>."` — the model keeps the id for a follow-up edit in the same conversation and never shows it — or a validation error string.
 - **Note:** The LLM extracts all structured fields from the user's raw message. If the user does not mention a currency, the LLM defaults `currency` to `"SGD"`. `category` must be one of the values in `CATEGORIES`; `amount` must parse as a positive `Decimal`; `date` must be `YYYY-MM-DD`.
 
@@ -759,7 +771,8 @@ Test each tool and storage function in complete isolation. All external dependen
 
 | Test file | Scenarios covered |
 |---|---|
-| `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` returns the CSV and deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` still exports and deletes when FX rates are unavailable, prefixing the no-SGD instruction; `end_trip` returns an error when no trip is active. Archive: every expense is copied in full with the start date and a `ttl` at the configured retention; the archive is invisible to the next trip's `EXPENSE#` queries; a failed archive write deletes nothing; an empty trip writes no archive. Confirmed non-vacuous by mutation — removing the archive fails three tests, moving it after the deletes fails one |
+| `test_trip_time.py` | `local_date` gives the day in the given zone — behind UTC (Los Angeles, the evening of the previous day), ahead of it (Singapore, the morning of the next), and in UTC — and refuses a time with no offset; `describe_date` includes the weekday; `is_valid_timezone` accepts IANA names and rejects unknown, empty and path-like ones; `check_trip_status` uses the default zone with no trip, the trip's zone with one, and the default for a trip without a zone; the graph routes `tools_node` back through `check_trip_status`. Confirmed non-vacuous by mutation — ignoring the trip's zone and routing tools straight to the agent each fail a test |
+| `test_trip.py` | `start_trip` records the local start date and zone, rejects an unknown zone, and refuses a second trip; `set_trip_timezone` moves the active trip and reports today in the new zone, and refuses with no trip or an unknown zone; `end_trip` returns the CSV and deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` still exports and deletes when FX rates are unavailable, prefixing the no-SGD instruction; `end_trip` returns an error when no trip is active. Archive: every expense is copied in full with the start date and a `ttl` at the configured retention; the archive is invisible to the next trip's `EXPENSE#` queries; a failed archive write deletes nothing; an empty trip writes no archive. Confirmed non-vacuous by mutation — removing the archive fails three tests, moving it after the deletes fails one |
 | `test_config.py` | `LOG_LEVEL` is upper-cased and whitespace-stripped; the normalised value is accepted by `logging`; unknown levels raise `ValidationError` |
 | `test_expenses.py` | Ids use only the unambiguous alphabet; `add_expense` records under its id, defaults the payment method and date, retries a colliding id without overwriting, gives up after repeated collisions, and rejects invalid input; `edit_expense` updates fields in place, keeps the name unless a summary is given, edits a date without moving the key, compares `expected_amount` numerically, and refuses a mismatched amount, an unknown id, an invalid expected amount, nothing to change, or invalid values; `delete_expense` removes only its target and refuses a mismatch or unknown id; `get_all_expenses` lists ids for the model, sorted by date then creation time. Three regressions replay the September trip's failures: the batched date edits, the neighbouring-line pick, and the rename-on-every-edit. Confirmed non-vacuous by mutation — removing the amount check fails three tests, the date sort one, the conditional write four |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |
@@ -775,7 +788,7 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_telegram_handler.py` | `_extract_text`; `handle_admin_command` ignores non-admins, prints usage for no or unknown subcommand, lists records, approves, rejects, deletes, and reports a missing record |
 | `test_reply_delivery.py` | Every reply goes out with no parse mode, including one containing a literal `<` — sent as HTML, that was rejected by Telegram in production. `_reply_in_chunks` and `_edit_in_chunks` deliver long content in order within the limit, the latter editing the first chunk in place and replying with the rest, and logging the dropped overflow when the message is inaccessible. Confirmed non-vacuous by mutation — reintroducing HTML for text containing `<` fails four tests |
 | `test_update_dedup.py` | `put_item_if_absent` writes to a free key, leaves an existing item untouched and returns False, and raises other failures rather than reading them as a taken key; `claim_update` writes an expiring marker, refuses a second claim of the same `update_id`, and treats different ids independently; `lambda_handler` processes a first delivery, acknowledges a redelivery without processing it, drops a body with no `update_id`, and claims nothing for a forged delivery. Confirmed non-vacuous by mutation — skipping the claim fails one test, dropping the write's condition fails three |
-| `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists; it always tells the model to keep expense ids from the user and never to re-add expenses from memory |
+| `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists; it ends with "Today is <weekday, date> (<zone>)" and everything before that line is identical from day to day; it tells the model never to ask for the date, to infer the category, to default to Card, to keep expense ids from the user and never to re-add expenses from memory |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
 
@@ -1260,7 +1273,12 @@ than the sender.
   - System prompt: never re-add expenses the model believes are missing; show the list
     and ask.
   - No backfill is needed while no live trip exists; archived trips keep their old shape.
-- [ ] **Default expense dates are in UTC, and the model does not know today's date.**
+- [x] **Default expense dates are in UTC, and the model does not know today's date.**
+  Done 9 Oct 2026 as designed below, with one addition: `tools_node` now returns through
+  `check_trip_status`, so a trip started or moved earlier in the same turn is re-read
+  before the next expense is dated. A turn that predates the change still carries
+  `message_date` in its checkpoint; the next message sets `message_time` and the old key
+  is unused.
   `handle_message` turns the Telegram message time — UTC — straight into `message_date`,
   the default for `add_expense`, while `start_trip` uses Singapore time. The first
   expense of the September trip shows the mismatch: logged at 06:57 SGT on 12 Sep,

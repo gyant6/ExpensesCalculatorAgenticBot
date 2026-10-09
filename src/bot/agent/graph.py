@@ -121,8 +121,12 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
 
     Graph flow:
         START → check_trip_status → agent_node → END
-                                         ↑  ↓ (if tool calls)
-                                         └─ tools_node
+                      ↑                  ↓ (if tool calls)
+                      └──────────── tools_node
+
+    Tools return through check_trip_status rather than straight to the agent, so a trip
+    started or moved to another time zone earlier in the turn is re-read — with its local
+    date — before the model's next step.
 
     Returns:
         The compiled LangGraph application ready to invoke with AgentState.
@@ -136,6 +140,7 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
         ToolNode(
             [
                 trip.start_trip,
+                trip.set_trip_timezone,
                 expenses.add_expense,
                 expenses.edit_expense,
                 expenses.delete_expense,
@@ -159,7 +164,7 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
             END: END,
         },
     )
-    workflow.add_edge("tools_node", "agent_node")
+    workflow.add_edge("tools_node", "check_trip_status")
     workflow.add_edge(END_TRIP_NODE, "agent_node")
     workflow.add_edge("end_trip_batch_error_node", "agent_node")
 
