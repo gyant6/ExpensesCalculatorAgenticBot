@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     # deletes them. The archive is the only copy besides the CSV sent to the chat, so it
     # covers a trip ended by mistake or a lost export. Defaults to 90 days.
     TRIP_ARCHIVE_TTL_SECONDS: int = 7_776_000
+    # How long a delivered Telegram update's marker is kept, so a redelivery of the same
+    # update is recognised and dropped. Telegram's observed redeliveries arrive within
+    # seconds of the original; a day leaves a wide margin at a few bytes per update.
+    UPDATE_DEDUP_TTL_SECONDS: int = 86_400
 
     @field_validator("LOG_LEVEL")
     @classmethod

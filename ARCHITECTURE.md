@@ -397,6 +397,7 @@ Consequences worth knowing:
 | `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date` | Active trip marker |
 | `USER#<ledger_id>` | `EXPENSE#<datetime>` | see below | Individual expense |
 | `USER#<ledger_id>` | `ARCHIVE#<ended_at>` | `start_date`, `ended_at`, `expenses`, `ttl` | An ended trip's expenses, kept for `TRIP_ARCHIVE_TTL_SECONDS` (90 days) |
+| `UPDATE#<update_id>` | `MARKER` | `claimed_at`, `ttl` | A Telegram update already handled; a redelivery finding it is dropped. Expires after `UPDATE_DEDUP_TTL_SECONDS` (one day) |
 | `AUTH#<id>` | `PROFILE` | `status`, `entity_type`, `username`, `requested_at`, `reviewed_at` | Access control record (user or group) |
 
 `<id>` is the Telegram user ID (positive) or group ID (negative). `entity_type` is `USER` or `GROUP`. `status` is `PENDING`, `APPROVED`, or `REJECTED`.
@@ -719,6 +720,7 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_graph.py` | `custom_routes` returns END for a non-AIMessage or a message with no tool calls, `end_trip` for a lone `end_trip` call, `end_trip_batch_error` for a mixed batch, and `tools` otherwise; `end_trip_batch_error_node` emits one rejecting `ToolMessage` per call in the batch |
 | `test_telegram_handler.py` | `_extract_text`; `handle_admin_command` ignores non-admins, prints usage for no or unknown subcommand, lists records, approves, rejects, deletes, and reports a missing record |
 | `test_reply_delivery.py` | Every reply goes out with no parse mode, including one containing a literal `<` — sent as HTML, that was rejected by Telegram in production. `_reply_in_chunks` and `_edit_in_chunks` deliver long content in order within the limit, the latter editing the first chunk in place and replying with the rest, and logging the dropped overflow when the message is inaccessible. Confirmed non-vacuous by mutation — reintroducing HTML for text containing `<` fails four tests |
+| `test_update_dedup.py` | `put_item_if_absent` writes to a free key, leaves an existing item untouched and returns False, and raises other failures rather than reading them as a taken key; `claim_update` writes an expiring marker, refuses a second claim of the same `update_id`, and treats different ids independently; `lambda_handler` processes a first delivery, acknowledges a redelivery without processing it, drops a body with no `update_id`, and claims nothing for a forged delivery. Confirmed non-vacuous by mutation — skipping the claim fails one test, dropping the write's condition fails three |
 | `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
@@ -1248,7 +1250,8 @@ the sender.
 
   A retried "add expense" would record the expense twice. Adds take ~10 s today, but turn
   time grows with the history (Phase 6). Fix (decided 8 Oct 2026):
-  - Deduplicate on `update_id`, which Telegram assigns uniquely to every incoming update
+  - **Done (9 Oct 2026)** — `src/bot/dedup.py`, claimed in `lambda_handler` after
+    authentication. Deduplicate on `update_id`, which Telegram assigns uniquely to every incoming update
     — messages and button taps alike — and repeats unchanged on a redelivery. As the
     first step of handling any update, a conditional put of `PK=UPDATE#<update_id>`,
     `SK=MARKER` with a one-day `ttl`; if the marker already exists the update is a

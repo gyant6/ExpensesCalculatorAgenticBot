@@ -141,7 +141,7 @@ def test_end_trip_archives_every_expense_with_an_expiry(
         {"SK": "EXPENSE#2", **base_expense, "amount": "9.5"},
     ]
     retention = settings.TRIP_ARCHIVE_TTL_SECONDS
-    assert before + retention <= archive[trip.TTL_ATTRIBUTE] <= after + retention
+    assert before + retention <= archive[dynamodb.TTL_ATTRIBUTE] <= after + retention
 
 
 @respx.mock

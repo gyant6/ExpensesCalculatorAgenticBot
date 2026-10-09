@@ -23,6 +23,7 @@ from telegram.ext import (
 )
 
 from src.bot.config import settings
+from src.bot.dedup import claim_update
 from src.bot.telegram_handler import (
     handle_admin_command,
     handle_auth_callback,
@@ -195,9 +196,9 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     API Gateway forwards each Telegram webhook POST here. The update is
     processed synchronously and a 200 is returned to acknowledge receipt.
-    Telegram retries updates that are not acknowledged within the timeout, so
-    this function must complete before the Lambda timeout — ensure the Lambda
-    timeout is set generously (≥ 30 s) to accommodate LLM and DynamoDB latency.
+    The HTTP API stops waiting after 30 s and Telegram then delivers the update
+    again, so each update is claimed by its `update_id` before processing and a
+    redelivery is acknowledged without running a second time.
 
     Args:
         event: API Gateway proxy integration event. The Telegram update JSON is
@@ -205,17 +206,33 @@ def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         context: Lambda context object (unused).
 
     Returns:
-        API Gateway response dict with statusCode 200.
+        API Gateway response dict: 403 for a delivery without the webhook secret,
+        200 otherwise — including for a redelivery or a body with no `update_id`,
+        neither of which is processed.
+
+    Raises:
+        botocore.exceptions.ClientError: If claiming the update fails. The invocation
+            fails, and Telegram delivers the update again.
     """
     if not _is_authentic(event):
         return _FORBIDDEN
+
+    body: dict[str, Any] = json.loads(event.get("body") or "{}")
+    update_id = body.get("update_id")
+    if not isinstance(update_id, int):
+        # Every genuine update carries one; without it the delivery can be neither
+        # deduplicated nor parsed. Acknowledged so Telegram does not keep resending it.
+        logger.warning("Dropping a delivery with no integer update_id")
+        return _OK
+    if not claim_update(update_id):
+        logger.info("Ignoring redelivered update %s", update_id)
+        return _OK
 
     global _lambda_loop
     if _lambda_loop is None:
         _lambda_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_lambda_loop)
 
-    body: dict[str, Any] = json.loads(event.get("body") or "{}")
     _lambda_loop.run_until_complete(_handle_update(body))
     return _OK
 

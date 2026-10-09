@@ -7,10 +7,11 @@ application settings so the same code works against DynamoDB Local and real AWS.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import boto3
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
+from botocore.exceptions import ClientError
 
 from src.bot.config import settings
 
@@ -19,6 +20,13 @@ if TYPE_CHECKING:
 
 deserializer = TypeDeserializer()
 serializer = TypeSerializer()
+
+# Must match `ttl.attribute_name` on the table in terraform/main.tf. DynamoDB deletes an
+# item some time after the epoch-seconds value in this attribute has passed.
+TTL_ATTRIBUTE: Final = "ttl"
+
+# Error code DynamoDB returns when a write's ConditionExpression evaluates false.
+_CONDITION_FAILED: Final = "ConditionalCheckFailedException"
 
 
 def get_client() -> DynamoDBClient:
@@ -87,6 +95,38 @@ def put_item(item: dict[str, Any]) -> None:
     """
     low_level_data = {k: serializer.serialize(v) for k, v in item.items()}
     get_client().put_item(TableName=settings.DYNAMODB_TABLE_NAME, Item=low_level_data)
+
+
+def put_item_if_absent(item: dict[str, Any]) -> bool:
+    """Write an item only if no item already exists at its primary key.
+
+    The check and the write are one atomic DynamoDB operation, so of two concurrent
+    callers writing the same key exactly one succeeds — which makes this usable as a
+    claim, not just an insert.
+
+    Args:
+        item: The full item to write as a plain Python dict. PK and SK must be included,
+            and all values must be Python-native types.
+
+    Returns:
+        True if the item was written, False if an item already existed at that key, in
+        which case the existing item is left untouched.
+
+    Raises:
+        botocore.exceptions.ClientError: If the request fails for any reason other than
+            the key already being taken.
+    """
+    try:
+        get_client().put_item(
+            TableName=settings.DYNAMODB_TABLE_NAME,
+            Item={k: serializer.serialize(v) for k, v in item.items()},
+            ConditionExpression="attribute_not_exists(PK)",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == _CONDITION_FAILED:
+            return False
+        raise
+    return True
 
 
 def transact_write_delete_put(pk: str, sk: str, item: dict[str, Any]) -> None:

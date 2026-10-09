@@ -21,10 +21,6 @@ logger = logging.getLogger(__name__)
 # no query for the current trip's expenses or its active marker can ever match it.
 ARCHIVE_SK_PREFIX = "ARCHIVE#"
 
-# Must match `ttl.attribute_name` on the table in terraform/main.tf. DynamoDB deletes an
-# item once the epoch-seconds value in this attribute has passed.
-TTL_ATTRIBUTE = "ttl"
-
 END_TRIP_SUCCESS = "Trip successfully ended."
 NO_ACTIVE_TRIP = (
     "There are no active trips to be ended. Start a new trip and add expenses first."
@@ -104,7 +100,7 @@ def _archive_trip(pk: str, start_date: str, expenses: list[dict[str, Any]]) -> N
                 {key: value for key, value in expense.items() if key != "PK"}
                 for expense in expenses
             ],
-            TTL_ATTRIBUTE: int(expires_at.timestamp()),
+            dynamodb.TTL_ATTRIBUTE: int(expires_at.timestamp()),
         }
     )
 
