@@ -70,3 +70,11 @@ variable "chart_client_timeout" {
   EOT
   type        = number
 }
+
+variable "artifacts_bucket_name" {
+  description = <<-EOT
+    Bucket the deploy script stages Lambda zips in for the length of one deploy. S3
+    names are global, so it carries the same random suffix as the state bucket.
+  EOT
+  type        = string
+}

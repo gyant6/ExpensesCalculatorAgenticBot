@@ -557,6 +557,28 @@ Both photos are omitted if rendering fails, or if FX rates were unavailable — 
 
 ## Runbook
 
+### Deploying code
+
+```
+uv run python scripts/build_lambda.py
+uv run python scripts/deploy_lambda.py              # the bot; add "charts" for the chart function
+```
+
+For each function the deploy script uploads the zip to the artifacts bucket in 8 MB parts,
+points the function at it, waits for the update to finish, checks Lambda's `CodeSha256`
+equals the local archive's, and deletes the staged zip — whether or not the update
+succeeded; the bucket's one-day expiry catches a process that dies first. A direct
+`update-function-code --zip-file` sends the 47 MB archive as one request, and on
+9 Oct 2026 that repeatedly stalled mid-upload and failed whole, on two networks.
+
+It needs nothing per machine beyond what Terraform already uses: names, bucket, region
+and the target account come from `terraform output`, and the profile from `--profile`,
+`AWS_PROFILE`, or `aws_profile` in `terraform/local.auto.tfvars`, in that order. It
+refuses to run when the credentials belong to another account — the default profile on
+the development laptop is a different account.
+
+---
+
 ### Rotating the Telegram bot token
 
 Five steps, and the last two are the ones that bite. Skipping step 4 means nothing reaches
@@ -587,8 +609,8 @@ cheerful 200, and every reply dies with `telegram.error.InvalidToken: Unauthoriz
    read once per cold start, so warm containers keep serving the previous token until they
    recycle. Re-pushing the code is the cleanest trigger — Terraform has `ignore_changes` on
    `filename`, so it causes no drift:
-   ```bash
-   aws lambda update-function-code --function-name ExpensesCalculatorAgenticBot      --zip-file fileb://function.zip --profile personal --region ap-southeast-1
+   ```
+   uv run python scripts/deploy_lambda.py
    ```
    Caching secrets at import is deliberate — fetching them per invocation would add SSM
    latency and cost to every message — but it does mean any secret rotation needs a deploy
@@ -787,6 +809,7 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_graph.py` | `custom_routes` returns END for a non-AIMessage or a message with no tool calls, `end_trip` for a lone `end_trip` call, `end_trip_batch_error` for a mixed batch, and `tools` otherwise; `end_trip_batch_error_node` emits one rejecting `ToolMessage` per call in the batch |
 | `test_telegram_handler.py` | `_extract_text`; `handle_admin_command` ignores non-admins, prints usage for no or unknown subcommand, lists records, approves, rejects, deletes, and reports a missing record |
 | `test_reply_delivery.py` | Every reply goes out with no parse mode, including one containing a literal `<` — sent as HTML, that was rejected by Telegram in production. `_reply_in_chunks` and `_edit_in_chunks` deliver long content in order within the limit, the latter editing the first chunk in place and replying with the rest, and logging the dropped overflow when the message is inaccessible. Confirmed non-vacuous by mutation — reintroducing HTML for text containing `<` fails four tests |
+| `test_deploy_lambda.py` | The profile comes from `--profile`, then `AWS_PROFILE`, then `aws_profile` in `local.auto.tfvars`, else the default chain; Terraform outputs are read, and a missing output or failed `terraform output` points at `apply` or `init`; `code_sha256` matches Lambda's encoding; a deploy uploads, updates from S3, waits, verifies and deletes; the staged zip is deleted even when the update fails; a checksum mismatch or failed update status is not reported as success; `main` refuses credentials for another account, deploys when the account matches, and stops on a missing archive |
 | `test_update_dedup.py` | `put_item_if_absent` writes to a free key, leaves an existing item untouched and returns False, and raises other failures rather than reading them as a taken key; `claim_update` writes an expiring marker, refuses a second claim of the same `update_id`, and treats different ids independently; `lambda_handler` processes a first delivery, acknowledges a redelivery without processing it, drops a body with no `update_id`, and claims nothing for a forged delivery. Confirmed non-vacuous by mutation — skipping the claim fails one test, dropping the write's condition fails three |
 | `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists; it ends with "Today is <weekday, date> (<zone>)" and everything before that line is identical from day to day; it tells the model never to ask for the date, to infer the category, to default to Card, to keep expense ids from the user and never to re-add expenses from memory |
 
@@ -1172,8 +1195,9 @@ push to main (after test.yml passes)
         ├── checkout code
         ├── install uv
         ├── uv run python scripts/build_lambda.py     # builds both archives
-        ├── aws lambda update-function-code --function-name <main>  --zip-file fileb://function.zip
-        └── aws lambda update-function-code --function-name <chart> --zip-file fileb://chart_function.zip
+        └── uv run python scripts/deploy_lambda.py bot charts
+                                                      # stages each in the artifacts bucket,
+                                                      # updates, verifies, deletes
 ```
 
 **AWS credential federation via OIDC (no long-lived keys):**

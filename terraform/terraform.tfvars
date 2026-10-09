@@ -33,3 +33,6 @@ lambda_memory_mb = 1024
 chart_lambda_timeout   = 25
 chart_client_timeout   = 30
 chart_lambda_memory_mb = 1024
+
+# Staging for scripts/deploy_lambda.py; empty between deploys.
+artifacts_bucket_name = "expenses-bot-artifacts-ojg0cd"

@@ -210,6 +210,100 @@ resource "aws_iam_role_policy" "chart_lambda_exec_policy" {
   })
 }
 
+# ── Deployment artefacts ──────────────────────────────────────────────────────
+# Staging for scripts/deploy_lambda.py, which uploads a zip here, points the function at
+# it, waits for the update, then deletes it — so the bucket is empty between deploys.
+# Uploading to S3 goes in parts that retry individually, where a direct 47 MB
+# update-function-code upload repeatedly stalled and failed whole.
+#
+# Kept apart from the state bucket on purpose: deploys need write and delete here, and
+# must never hold those permissions on Terraform state. Unversioned, so a delete really
+# removes the zip.
+
+resource "aws_s3_bucket" "artifacts" {
+  bucket = var.artifacts_bucket_name
+
+  # Holds nothing that outlives a deploy, so a leftover zip must not block destroying it.
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+# Backstop for a deploy that fails between upload and delete: nothing stays past a day.
+resource "aws_s3_bucket_lifecycle_configuration" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+
+  rule {
+    id     = "expire-staged-zips"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 1
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+}
+
+data "aws_iam_policy_document" "artifacts" {
+  statement {
+    sid     = "DenyInsecureTransport"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.artifacts.arn,
+      "${aws_s3_bucket.artifacts.arn}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id
+  policy = data.aws_iam_policy_document.artifacts.json
+
+  depends_on = [aws_s3_bucket_public_access_block.artifacts]
+}
+
 # ── Lambda functions ──────────────────────────────────────────────────────────
 # Terraform creates these functions; the AWS CLI deploys code into them. The lifecycle
 # blocks below are what keep those two responsibilities from fighting: without them, a
