@@ -14,7 +14,12 @@ from datetime import datetime, timezone
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
-from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
+from src.bot.agent.graph import (
+    END_TRIP_NODE,
+    build_graph,
+    clear_thread_history,
+    thread_id_for,
+)
 
 
 def run(user_id: str) -> None:
@@ -28,7 +33,7 @@ def run(user_id: str) -> None:
         user_id: Simulated Telegram user ID string used as the DynamoDB thread key.
     """
     graph = build_graph()
-    thread_id = f"dev#{user_id}"
+    thread_id = thread_id_for(f"dev#{user_id}")
     config = {"configurable": {"thread_id": thread_id}}
 
     print(f"Dev runner — user_id={user_id}. Type 'exit' to quit.\n")

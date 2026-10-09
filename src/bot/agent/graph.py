@@ -1,6 +1,7 @@
 """Compiled LangGraph agent graph for the expenses bot."""
 
 import logging
+from typing import Final
 
 from botocore.exceptions import ClientError
 from langchain_core.messages import AIMessage, ToolMessage
@@ -20,6 +21,26 @@ logger = logging.getLogger(__name__)
 # Node name shared with telegram_handler, which inspects graph.get_state(...).next to
 # detect that the graph is paused awaiting end_trip confirmation.
 END_TRIP_NODE = "end_trip_node"
+
+# Bump whenever AgentState's fields change. A checkpoint written under an older shape can
+# leave an interrupted end_trip unable to resume: on 9 Oct 2026 a leftover `message_date`
+# key made the resume return without running the node. A new version starts every chat
+# on a fresh thread instead; old threads expire through the checkpointer's TTL. Expenses
+# live outside the thread, so only the conversation context resets.
+THREAD_SCHEMA_VERSION: Final = 2
+
+
+def thread_id_for(ledger_id: str) -> str:
+    """The checkpointer thread holding a ledger's conversation.
+
+    Args:
+        ledger_id: The ledger (Telegram chat ID) whose conversation this is.
+
+    Returns:
+        The thread ID, carrying THREAD_SCHEMA_VERSION so a state-shape change never
+        resumes a thread written under the old shape.
+    """
+    return f"{ledger_id}:v{THREAD_SCHEMA_VERSION}"
 
 
 def clear_thread_history(

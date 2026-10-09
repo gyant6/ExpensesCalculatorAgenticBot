@@ -26,7 +26,12 @@ from telegram import (
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from src.bot.agent.graph import END_TRIP_NODE, build_graph, clear_thread_history
+from src.bot.agent.graph import (
+    END_TRIP_NODE,
+    build_graph,
+    clear_thread_history,
+    thread_id_for,
+)
 from src.bot.auth import (
     AUTH_PK_PREFIX,
     AUTH_SK,
@@ -75,6 +80,13 @@ _QUERY_EXPIRED = "query is too old"
 # overwritten with the summary. Ending a trip takes several seconds — an FX fetch, chart
 # rendering, and two model round trips — so the tap needs visible acknowledgement.
 _ENDING_TRIP_NOTICE = "Ending your trip and putting your summary together…"
+
+# Shown when the resumed graph returns but the trip is still active, so end_trip did not
+# run. Says plainly that nothing was lost and how to retry.
+_END_TRIP_FAILED = (
+    "I couldn't end the trip, so nothing was deleted and your expenses are safe. "
+    'Send "end trip" to try again.'
+)
 
 _CSV_FILENAME = "expenses.csv"
 
@@ -156,8 +168,8 @@ def _ledger_id_for(update: Update) -> str | None:
 
 
 def _config(ledger_id: str) -> RunnableConfig:
-    """Build the graph config that scopes checkpointed state to one Telegram user."""
-    return {"configurable": {"thread_id": ledger_id}}
+    """Build the graph config that scopes checkpointed state to one ledger's thread."""
+    return {"configurable": {"thread_id": thread_id_for(ledger_id)}}
 
 
 def _extract_text(content: str | list[Any]) -> str:
@@ -737,6 +749,25 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
 
         with _timed(timings, "graph"):
             result = await asyncio.to_thread(_graph.invoke, None, config)
+
+        # Check rather than trust the resume. On 9 Oct 2026 it returned without running
+        # end_trip, and the bot reported "Trip ended." and cleared the history while the
+        # trip and its expenses were untouched.
+        trip = await asyncio.to_thread(get_item, f"USER#{ledger_id}", "TRIP#ACTIVE")
+        if trip is not None:
+            logger.error(
+                "end_trip did not run on resume for ledger %s; the trip is still active",
+                ledger_id,
+            )
+            await query.edit_message_text(_END_TRIP_FAILED)
+            # The thread is left paused at a confirmation whose keyboard is gone, so the
+            # next message would be refused. Clearing it lets "end trip" start over; the
+            # expenses live outside the thread and are untouched.
+            await asyncio.to_thread(
+                clear_thread_history, _graph, thread_id_for(ledger_id)
+            )
+            return
+
         content = _extract_text(result["messages"][-1].content) or "Trip ended."
 
         with _timed(timings, "send"):
@@ -746,7 +777,9 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         # Only once the summary and files are delivered: this discards the history the
         # summary was written from, and the next trip starts with a clean thread.
         with _timed(timings, "clear"):
-            await asyncio.to_thread(clear_thread_history, _graph, ledger_id)
+            await asyncio.to_thread(
+                clear_thread_history, _graph, thread_id_for(ledger_id)
+            )
 
         _log_timings("end_trip", ledger_id, timings, expenses=len(expenses))
     else:

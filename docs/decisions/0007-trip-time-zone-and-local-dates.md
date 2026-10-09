@@ -32,7 +32,10 @@ don't have today's date" and asked for dates it could have defaulted.
 
 - With no active trip, the zone is Singapore.
 - Expenses already recorded keep their dates when the zone changes.
-- Old checkpoints carrying the retired `message_date` key load cleanly; verified.
+- Old checkpoints carrying the retired `message_date` key load for an ordinary turn, but
+  **not** for resuming an interrupted end-trip: on the first production trip end after
+  this change, the resume ran nothing. See
+  [0012](0012-versioned-conversation-threads.md).
 
 ## Alternatives considered
 

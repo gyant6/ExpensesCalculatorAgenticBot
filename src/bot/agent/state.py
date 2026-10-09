@@ -6,6 +6,9 @@ from langgraph.graph import MessagesState
 
 
 class AgentState(MessagesState):
+    """The graph's checkpointed state. Bump THREAD_SCHEMA_VERSION in graph.py when the
+    fields change, so no thread written under the old shape is resumed."""
+
     ledger_id: str
     # The incoming message's own timestamp, timezone-aware ISO-8601 in UTC. Its own time
     # rather than the processing time, so a delayed or redelivered update keeps its day.

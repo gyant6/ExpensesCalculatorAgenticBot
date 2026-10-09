@@ -20,3 +20,4 @@ Finished work that constrains nothing is not recorded here; git history has it.
 | [0009](0009-deploy-through-temporary-artifacts-bucket.md) | Deploy through a temporary, unversioned artifacts bucket |
 | [0010](0010-archive-trip-before-delete.md) | Archive a trip's expenses before deleting them |
 | [0011](0011-plain-text-replies.md) | Send replies as plain text |
+| [0012](0012-versioned-conversation-threads.md) | Versioned conversation threads; check a trip really ended |
