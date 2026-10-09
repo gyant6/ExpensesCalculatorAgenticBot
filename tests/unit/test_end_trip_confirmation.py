@@ -18,7 +18,12 @@ from langchain_core.messages import AIMessage
 from telegram import Message
 
 from src.bot import telegram_handler
-from src.bot.agent.graph import END_TRIP_NODE, THREAD_SCHEMA_VERSION, thread_id_for
+from src.bot.agent.graph import (
+    CHECKPOINT_DURABILITY,
+    END_TRIP_NODE,
+    THREAD_SCHEMA_VERSION,
+    thread_id_for,
+)
 
 LEDGER = 111111111
 
@@ -107,13 +112,14 @@ async def test_an_ended_trip_sends_the_summary_and_files_then_clears(
     )
 
 
-async def test_the_graph_is_resumed_on_the_versioned_thread(
+async def test_the_graph_is_resumed_on_the_versioned_thread_saving_once(
     harness: dict[str, Any],
 ) -> None:
     await telegram_handler.handle_callback(harness["update"], MagicMock())
 
-    config = harness["graph"].invoke.call_args.args[1]
-    assert config == {"configurable": {"thread_id": thread_id_for(str(LEDGER))}}
+    resume = harness["graph"].invoke.call_args
+    assert resume.args[1] == {"configurable": {"thread_id": thread_id_for(str(LEDGER))}}
+    assert resume.kwargs == {"durability": CHECKPOINT_DURABILITY}
 
 
 def test_thread_ids_carry_the_schema_version() -> None:

@@ -27,6 +27,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from src.bot.agent.graph import (
+    CHECKPOINT_DURABILITY,
     END_TRIP_NODE,
     build_graph,
     clear_thread_history,
@@ -507,6 +508,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "message_time": message_time,
             },
             config,
+            durability=CHECKPOINT_DURABILITY,
         )
 
     with _timed(timings, "state_after"):
@@ -748,7 +750,9 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
             )
 
         with _timed(timings, "graph"):
-            result = await asyncio.to_thread(_graph.invoke, None, config)
+            result = await asyncio.to_thread(
+                _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
+            )
 
         # Check rather than trust the resume. On 9 Oct 2026 it returned without running
         # end_trip, and the bot reported "Trip ended." and cleared the history while the
@@ -798,7 +802,9 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
             },
             END_TRIP_NODE,
         )
-        result = await asyncio.to_thread(_graph.invoke, None, config)
+        result = await asyncio.to_thread(
+            _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
+        )
         last_msg = result["messages"][-1]
         content = _extract_text(last_msg.content) or "Trip ending cancelled."
         await _edit_in_chunks(query, content)

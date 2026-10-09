@@ -29,6 +29,15 @@ END_TRIP_NODE = "end_trip_node"
 # live outside the thread, so only the conversation context resets.
 THREAD_SCHEMA_VERSION: Final = 2
 
+# Pass as `durability=` on every graph.invoke. The default, "sync", saves a full snapshot
+# after every step and keeps them all: one message with a tool call wrote 7 snapshots and
+# 41 chunk and write items, and ending a long trip spent 14.8 s deleting them. "exit"
+# saves once, when the run finishes or pauses at the end-trip confirmation — 1 snapshot
+# and 1 item — and the confirmation still resumes from it. The cost: a crash mid-turn
+# loses that turn's conversation, though not any expense its tools already wrote.
+# (DynamoDBSaver 1.1.1 does not implement prune(); it raises NotImplementedError.)
+CHECKPOINT_DURABILITY: Final = "exit"
+
 
 def thread_id_for(ledger_id: str) -> str:
     """The checkpointer thread holding a ledger's conversation.
@@ -49,10 +58,9 @@ def clear_thread_history(
 ) -> None:
     """Delete every checkpoint and pending write for one conversation thread.
 
-    Call this once a trip's summary has been delivered. `agent_node` replays the entire
-    `messages` list to Bedrock on every turn, so an ended trip's history would otherwise
-    inflate the cost and latency of every later message indefinitely, and grow the
-    checkpoint item towards DynamoDB's 400 KB per-item limit.
+    Call this once a trip's summary has been delivered. An ended trip's history would
+    otherwise carry into the next trip's conversation, and the checkpoint would keep
+    growing towards DynamoDB's 400 KB per-item limit.
 
     Must not be called before the summary is produced: the summary is written by
     `agent_node` after `end_trip` returns, and it reads the history this deletes.
@@ -193,10 +201,9 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
         table_name=settings.DYNAMODB_TABLE_NAME,
         endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
         region_name=settings.AWS_REGION,
-        # Each checkpoint is a full snapshot of the message history and one is written per
-        # graph step, so the same conversation is stored many times over. Compression cuts
-        # the DynamoDB write and read units that costs; it does not affect the tokens sent
-        # to Bedrock, which sees the state decompressed.
+        # Each checkpoint is a full snapshot of the message history, and one is kept per
+        # turn until the trip ends. Compression cuts the DynamoDB write and read units
+        # that costs; it does not affect the tokens sent to Bedrock.
         enable_checkpoint_compression=True,
         # Writes a `ttl` epoch attribute on every checkpoint. DynamoDB's TTL process
         # deletes items past that timestamp, cleaning up abandoned threads automatically.

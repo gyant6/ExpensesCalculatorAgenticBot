@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from src.bot.agent.graph import (
+    CHECKPOINT_DURABILITY,
     END_TRIP_NODE,
     build_graph,
     clear_thread_history,
@@ -56,7 +57,7 @@ def run(user_id: str) -> None:
         if END_TRIP_NODE in (state.next or ()):
             # Graph is paused before end_trip_node — treat this turn as the confirmation.
             if user_input.lower() in ("y", "yes"):
-                result = graph.invoke(None, config)
+                result = graph.invoke(None, config, durability=CHECKPOINT_DURABILITY)
                 trip_ended = True
             else:
                 last_ai = state.values["messages"][-1]
@@ -73,7 +74,7 @@ def run(user_id: str) -> None:
                     },
                     as_node="end_trip_node",
                 )
-                result = graph.invoke(None, config)
+                result = graph.invoke(None, config, durability=CHECKPOINT_DURABILITY)
         else:
             # UTC, as Telegram sends it; the graph converts to the trip's local day.
             message_time = datetime.now(timezone.utc).isoformat()
@@ -84,6 +85,7 @@ def run(user_id: str) -> None:
                     "message_time": message_time,
                 },
                 config,
+                durability=CHECKPOINT_DURABILITY,
             )
 
         state_after = graph.get_state(config)

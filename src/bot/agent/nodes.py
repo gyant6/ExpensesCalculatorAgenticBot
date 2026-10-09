@@ -1,10 +1,17 @@
 """LangGraph node functions for the expenses bot agent graph."""
 
+from collections.abc import Sequence
 from typing import Any
 
 import boto3
 from langchain_aws import ChatBedrockConverse
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    trim_messages,
+)
+from langchain_core.messages.utils import count_tokens_approximately
 
 from src.bot.agent.prompts import get_system_prompt
 from src.bot.agent.state import AgentState
@@ -58,12 +65,49 @@ def check_trip_status(state: AgentState) -> dict[str, Any]:
     }
 
 
+def bounded_history(
+    messages: Sequence[BaseMessage], token_budget: int
+) -> list[BaseMessage]:
+    """The most recent part of the conversation, for sending to the model.
+
+    Cuts only at the start of a user message, so a tool call is never separated from its
+    result and the window never opens mid-exchange. The current turn — the latest user
+    message and everything after it — is always kept whole, even past the budget,
+    because the model needs its own tool results to finish the turn.
+
+    Args:
+        messages: The full conversation from the checkpoint.
+        token_budget: Approximate token ceiling for the returned history.
+
+    Returns:
+        A suffix of messages that starts with a user message, or every message when there
+        is no user message at all.
+    """
+    last_user = max(
+        (i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=None
+    )
+    if last_user is None:
+        return list(messages)
+
+    window = trim_messages(
+        messages,
+        strategy="last",
+        token_counter=count_tokens_approximately,
+        max_tokens=token_budget,
+        start_on="human",
+        allow_partial=False,
+    )
+    # Empty when the current turn alone exceeds the budget; it is sent whole regardless.
+    return window or list(messages[last_user:])
+
+
 def agent_node(state: AgentState) -> dict[str, Any]:
     """Invoke the LLM with the current message history and system prompt.
 
     Builds a system prompt reflecting whether the user has an active trip, then
-    calls the Bedrock-hosted LLM with all messages in state. The LLM responds
-    with either a plain text reply or tool call requests.
+    calls the Bedrock-hosted LLM with the recent part of the conversation — see
+    bounded_history. The LLM responds with either a plain text reply or tool call
+    requests.
 
     Args:
         state: Current agent state containing messages, plus the trip_start_date,
@@ -80,6 +124,9 @@ def agent_node(state: AgentState) -> dict[str, Any]:
             state["trip_start_date"], state["local_date"], state["trip_timezone"]
         )
     )
-    response = llm_with_tools.invoke([sys_prompt, *list(state["messages"])])
+    history = bounded_history(
+        list(state["messages"]), settings.MODEL_HISTORY_TOKEN_BUDGET
+    )
+    response = llm_with_tools.invoke([sys_prompt, *history])
 
     return {"messages": [response]}

@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     # deletes them. The archive is the only copy besides the CSV sent to the chat, so it
     # covers a trip ended by mistake or a lost export. Defaults to 90 days.
     TRIP_ARCHIVE_TTL_SECONDS: int = 7_776_000
+    # Tokens of conversation history sent to the model on each call, counted
+    # approximately. The full history stays in the checkpoint; only what is sent is cut,
+    # always at the start of a user message and never inside the current turn. The tools
+    # read expenses live, so older turns are context rather than data. A September 2026
+    # trip averaged ~34K input tokens per call with no bound, peaking at 90K.
+    MODEL_HISTORY_TOKEN_BUDGET: int = 8_000
     # How long a delivered Telegram update's marker is kept, so a redelivery of the same
     # update is recognised and dropped. Telegram's observed redeliveries arrive within
     # seconds of the original; a day leaves a wide margin at a few bytes per update.

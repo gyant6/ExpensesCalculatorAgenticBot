@@ -21,3 +21,4 @@ Finished work that constrains nothing is not recorded here; git history has it.
 | [0010](0010-archive-trip-before-delete.md) | Archive a trip's expenses before deleting them |
 | [0011](0011-plain-text-replies.md) | Send replies as plain text |
 | [0012](0012-versioned-conversation-threads.md) | Versioned conversation threads; check a trip really ended |
+| [0013](0013-bounded-history-and-once-per-turn-checkpoints.md) | Bound the history sent to the model; save the conversation once per turn |
