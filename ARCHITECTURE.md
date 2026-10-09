@@ -1058,12 +1058,15 @@ to a REST API later means replacing the gateway and re-running `setWebhook`.
   front of it, and neither is justified while the token check holds
 
 #### Step 9 — Data protection
-- [ ] Enable DynamoDB point-in-time recovery on the table (`point_in_time_recovery { enabled = true }`
+- [x] Enable DynamoDB point-in-time recovery on the table (`point_in_time_recovery { enabled = true }`
   in `main.tf`): restores the table to any second in the last 35 days. The trip archive
-  only covers ending a trip; nothing today recovers from a bad edit or delete mid-trip,
-  which the September trip showed is not hypothetical (Phase 4). A restore creates a new
-  table, so the runbook needs a short entry on restoring and switching
-  `DYNAMODB_TABLE_NAME` to it
+  only covers ending a trip; nothing previously recovered from a bad edit or delete
+  mid-trip, which the September trip showed is not hypothetical (Phase 4). Applied 9 Oct
+  2026 as a single in-place change; `describe-continuous-backups` reports PITR
+  `ENABLED` with a 35-day window, earliest restorable time 13:29 SGT that day. Cost at
+  $0.228 per GB-month on a 38.7 KB table rounds to $0.00. A restore creates a new table;
+  the runbook's "Restoring the expenses table" copies items back rather than switching
+  the bot over
 
 #### Step 7 — Bedrock Guardrails
 - [ ] Denied topics policy: block off-topic requests (financial advice, general chat) and keep the agent scoped to expense tracking
