@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from src.bot.config import settings
 from src.bot.export import generate_csv
 from src.bot.storage import dynamodb
+from src.bot.tools.expenses import list_expenses
 from src.bot.tools.fx import get_sgd_exchange_rates
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ def _archive_trip(pk: str, start_date: str, expenses: list[dict[str, Any]]) -> N
     Args:
         pk: Partition key of the ledger whose trip is ending (e.g. 'USER#123456789').
         start_date: The trip's start date, from its TRIP#ACTIVE marker.
-        expenses: Every expense item of the trip, as returned by query_by_prefix.
+        expenses: Every expense item of the trip, as returned by list_expenses.
 
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails, including when
@@ -137,7 +138,8 @@ def end_trip(
     if active_trip is None:
         return NO_ACTIVE_TRIP
 
-    expenses = dynamodb.query_by_prefix(pk, "EXPENSE#")
+    # Sorted by date, so the CSV the summary is written from reads chronologically.
+    expenses = list_expenses(ledger_id)
 
     fx_rates: dict[str, float] = {}
     rates_unavailable = False

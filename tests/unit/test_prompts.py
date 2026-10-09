@@ -33,6 +33,20 @@ def test_prompt_always_includes_tools_list() -> None:
         assert "add_expense" in prompt
 
 
+def test_prompt_keeps_expense_ids_away_from_the_user() -> None:
+    for date in (None, "2026-08-01"):
+        assert "Never show expense ids to the user" in get_system_prompt(date)
+
+
+def test_prompt_forbids_re_adding_expenses_from_memory() -> None:
+    # On the September trip the model "restored" a list from memory, double-counting three
+    # expenses and inventing a fourth.
+    for date in (None, "2026-08-01"):
+        assert "Never re-add expenses you believe are missing" in get_system_prompt(
+            date
+        )
+
+
 def test_prompt_always_includes_sgd_dollar_sign_instruction() -> None:
     for date in (None, "2026-08-01"):
         prompt = get_system_prompt(trip_start_date=date)

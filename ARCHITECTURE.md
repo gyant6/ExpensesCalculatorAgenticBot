@@ -395,7 +395,7 @@ Consequences worth knowing:
 | PK | SK | Attributes | Description |
 |---|---|---|---|
 | `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date` | Active trip marker |
-| `USER#<ledger_id>` | `EXPENSE#<datetime>` | see below | Individual expense |
+| `USER#<ledger_id>` | `EXPENSE#<id>` | see below | Individual expense, keyed by an immutable 4-character id |
 | `USER#<ledger_id>` | `ARCHIVE#<ended_at>` | `start_date`, `ended_at`, `expenses`, `ttl` | An ended trip's expenses, kept for `TRIP_ARCHIVE_TTL_SECONDS` (90 days) |
 | `UPDATE#<update_id>` | `MARKER` | `claimed_at`, `ttl` | A Telegram update already handled; a redelivery finding it is dropped. Expires after `UPDATE_DEDUP_TTL_SECONDS` (one day) |
 | `AUTH#<id>` | `PROFILE` | `status`, `entity_type`, `username`, `requested_at`, `reviewed_at` | Access control record (user or group) |
@@ -407,7 +407,7 @@ Consequences worth knowing:
 | Attribute | Type | Example |
 |---|---|---|
 | `PK` | String | `USER#123456789` |
-| `SK` | String | `EXPENSE#2026-06-04T14:32:05.123456+00:00` |
+| `SK` | String | `EXPENSE#k7qm` |
 | `date` | String (ISO-8601) | `2026-06-04` |
 | `source_message` | String | `1200 yen at Ichiran ramen for dinner` |
 | `category` | String | `Food` |
@@ -415,7 +415,8 @@ Consequences worth knowing:
 | `amount` | Number (Decimal) | `1200` |
 | `summary` | String | `Dinner at Ichiran ramen` |
 | `payment_method` | String | `Cash` |
-| `updated_at` | String (ISO-8601) | `2026-06-04T13:45:00.000000+00:00` |
+| `created_at` | String (ISO-8601, UTC) | `2026-06-04T13:45:00.000000+00:00` |
+| `updated_at` | String (ISO-8601, UTC) | `2026-06-04T13:45:00.000000+00:00` |
 
 **Trip archive item.** `end_trip` copies the trip into a single item before deleting
 anything, so ending a trip by mistake, or losing the CSV sent to the chat, is
@@ -443,24 +444,24 @@ All tools are LangChain `@tool`-decorated functions. `telegram_user_id` is injec
 
 ### 2. `add_expense`
 - **Input:** `source_message: str`, `summary: str`, `category: str`, `amount: str`, `currency: str`, `date: str | None = None`, `payment_method: str = "Cash"`
-- **Action:** Writes an `EXPENSE#<datetime>` item (SK = `EXPENSE#` + `datetime.now(timezone.utc).isoformat()`) with the amount and currency as provided. No FX conversion at write time. When `date` is None, falls back to `message_date` from state.
-- **Returns:** `"Expense recorded."`, or a validation error string describing what was invalid.
+- **Action:** Writes an `EXPENSE#<id>` item, where `<id>` is four random characters from an alphabet without look-alikes (`23456789abcdefghjkmnpqrstuvwxyz`). The write is conditional on the key being free, so a collision retries with a fresh id rather than overwriting; five consecutive collisions raise. Records `created_at` and `updated_at` in UTC. No FX conversion at write time. When `date` is None, falls back to `message_date` from state.
+- **Returns:** `"Expense recorded with id <id>."` — the model keeps the id for a follow-up edit in the same conversation and never shows it — or a validation error string.
 - **Note:** The LLM extracts all structured fields from the user's raw message. If the user does not mention a currency, the LLM defaults `currency` to `"SGD"`. `category` must be one of the values in `CATEGORIES`; `amount` must parse as a positive `Decimal`; `date` must be `YYYY-MM-DD`.
 
 ### 3. `edit_expense`
-- **Input:** `expense_num: int` (1-based index as shown by `get_all_expenses`), `edit_message: str`, `summary: str`, and any subset of `category`, `amount`, `currency`, `date`, `payment_method`
-- **Action:** Updates the supplied fields and `updated_at`, appending `edit_message` to the existing `source_message`. When `date` changes the SK must change too, so the item is moved via a single `transact_write_items` (delete + put) instead of updated in place.
-- **Returns:** `"Edit expense successful."`, or an error string if no optional field was supplied or a value failed validation.
+- **Input:** `expense_id: str`, `expected_amount: str`, `edit_message: str`, and any subset of `summary`, `category`, `amount`, `currency`, `date`, `payment_method`
+- **Action:** Fetches `EXPENSE#<expense_id>` with one `get_item`, and refuses unless its current amount equals `expected_amount` (compared as `Decimal`). Then updates the supplied fields and `updated_at` in place, appending `edit_message` to `source_message`. A date edit is an ordinary update — the key is the id, so nothing moves. `summary` changes only when passed, which the model does only when the user asks to rename.
+- **Returns:** `"Edit expense successful."`, or an error string if nothing was to change, the id is unknown, the amount did not match (naming what the id actually holds), or a value failed validation.
 
 ### 4. `delete_expense`
-- **Input:** `expense_num: int` (1-based index as shown by `get_all_expenses`)
-- **Action:** Queries all `EXPENSE#*` items for this user and deletes the one at that position.
-- **Returns:** `"Expense deleted."`, or an error string if the index is out of range.
+- **Input:** `expense_id: str`, `expected_amount: str`
+- **Action:** The same fetch and amount check as `edit_expense`, then deletes the item.
+- **Returns:** `"Expense deleted."`, or an error string if the id is unknown or the amount did not match.
 
 ### 5. `get_all_expenses`
-- **Input:** _(none beyond user_id)_
-- **Action:** Queries all `EXPENSE#*` items for this user.
-- **Returns:** A numbered, pipe-delimited list — `summary | category | amount currency | date | payment_method` — or a message indicating no expenses are recorded. The 1-based position in this list is what `edit_expense` and `delete_expense` take as `expense_num`.
+- **Input:** _(none beyond ledger_id)_
+- **Action:** `list_expenses`: queries all `EXPENSE#*` items for the ledger and sorts them by `date`, then `created_at`. The end-trip CSV and attachments use the same function, so every list reads chronologically.
+- **Returns:** `number | id | summary | category | amount currency | date | payment_method`, one line per expense, or a message indicating none are recorded. The id column is for the model's edits and deletes only; the system prompt tells it to show the user numbered lines without ids.
 
 ### 6. `end_trip`
 - **Input:** _(none beyond user_id)_
@@ -733,9 +734,9 @@ Test each tool and storage function in complete isolation. All external dependen
 |---|---|
 | `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` returns the CSV and deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` still exports and deletes when FX rates are unavailable, prefixing the no-SGD instruction; `end_trip` returns an error when no trip is active. Archive: every expense is copied in full with the start date and a `ttl` at the configured retention; the archive is invisible to the next trip's `EXPENSE#` queries; a failed archive write deletes nothing; an empty trip writes no archive. Confirmed non-vacuous by mutation — removing the archive fails three tests, moving it after the deletes fails one |
 | `test_config.py` | `LOG_LEVEL` is upper-cased and whitespace-stripped; the normalised value is accepted by `logging`; unknown levels raise `ValidationError` |
-| `test_expenses.py` | `add_expense` writes item with raw amount and currency; `edit_expense` updates only the specified fields; `delete_expense` removes correct item; `get_all_expenses` returns a no-expenses message when the user has none |
+| `test_expenses.py` | Ids use only the unambiguous alphabet; `add_expense` records under its id, defaults the payment method and date, retries a colliding id without overwriting, gives up after repeated collisions, and rejects invalid input; `edit_expense` updates fields in place, keeps the name unless a summary is given, edits a date without moving the key, compares `expected_amount` numerically, and refuses a mismatched amount, an unknown id, an invalid expected amount, nothing to change, or invalid values; `delete_expense` removes only its target and refuses a mismatch or unknown id; `get_all_expenses` lists ids for the model, sorted by date then creation time. Three regressions replay the Tahiti failures: the batched date edits, the neighbouring-line pick, and the rename-on-every-edit. Confirmed non-vacuous by mutation — removing the amount check fails three tests, the date sort one, the conditional write four |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |
-| `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `update_item`, `transact_write_delete_put` and `query_by_prefix` against moto; `query_by_prefix` returns every item across DynamoDB's 1 MB page boundary |
+| `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `update_item` and `query_by_prefix` against moto; `query_by_prefix` returns every item across DynamoDB's 1 MB page boundary |
 | `test_export.py` | `to_sgd` converts foreign currency, passes SGD through, and returns None for an unparseable amount or a missing rate; `generate_csv` emits the expected columns, populates `amount_sgd`, blanks it when no rate exists, and preserves the original amount and currency |
 | `test_charts.py` | `generate_charts` returns PNG bytes for a populated trip, for an empty one, and when no expense has a usable rate |
 | `test_chart_handler.py` | The chart Lambda returns both images base64-encoded, renders placeholders for a trip with no expenses, and rejects an event missing a required key or carrying a non-list `expenses` |
@@ -747,7 +748,7 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_telegram_handler.py` | `_extract_text`; `handle_admin_command` ignores non-admins, prints usage for no or unknown subcommand, lists records, approves, rejects, deletes, and reports a missing record |
 | `test_reply_delivery.py` | Every reply goes out with no parse mode, including one containing a literal `<` — sent as HTML, that was rejected by Telegram in production. `_reply_in_chunks` and `_edit_in_chunks` deliver long content in order within the limit, the latter editing the first chunk in place and replying with the rest, and logging the dropped overflow when the message is inaccessible. Confirmed non-vacuous by mutation — reintroducing HTML for text containing `<` fails four tests |
 | `test_update_dedup.py` | `put_item_if_absent` writes to a free key, leaves an existing item untouched and returns False, and raises other failures rather than reading them as a taken key; `claim_update` writes an expiring marker, refuses a second claim of the same `update_id`, and treats different ids independently; `lambda_handler` processes a first delivery, acknowledges a redelivery without processing it, drops a body with no `update_id`, and claims nothing for a forged delivery. Confirmed non-vacuous by mutation — skipping the claim fails one test, dropping the write's condition fails three |
-| `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists |
+| `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists; it always tells the model to keep expense ids from the user and never to re-add expenses from memory |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
 
@@ -1189,7 +1190,10 @@ only finds out from a wrong total. The first item was observed three times on th
 trip (Sep 2026); the rest are consequences of scoping the ledger to the chat rather than
 the sender.
 
-- [ ] **Edits and deletes hit the wrong expense.** Observed on the September trip by reading
+- [x] **Edits and deletes hit the wrong expense.** Done 9 Oct 2026 as designed below:
+  `EXPENSE#<id>` keys, `expense_id` + `expected_amount` on edit and delete, optional
+  `summary`, `list_expenses` sorted by date, the prompt rules, and
+  `transact_write_delete_put` removed now that date edits update in place. Observed on the September trip by reading
   the full group history against the exported CSV:
   - *Batched date edits* ("change 13-15 to 13 Sep", then "change 9-12 to 12 Sep"). A
     date edit rewrites the expense's SK, which is what the list is sorted by, so the

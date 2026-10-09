@@ -42,10 +42,10 @@ from src.bot.storage.dynamodb import (
     delete_item,
     get_item,
     put_item,
-    query_by_prefix,
     scan_by_pk_prefix,
     update_item,
 )
+from src.bot.tools.expenses import list_expenses
 from src.bot.tools.fx import get_sgd_exchange_rates
 
 logger = logging.getLogger(__name__)
@@ -600,7 +600,7 @@ def _render_attachments(
     so the user keeps their data; charts are skipped because they plot SGD only.
 
     Args:
-        expenses: Expense items for the trip, as returned by query_by_prefix.
+        expenses: Expense items for the trip, as returned by list_expenses.
         ledger_id: Used only to correlate log records.
 
     Returns:
@@ -725,9 +725,8 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         # Render the attachments first: resuming the graph runs end_trip, which deletes
         # the expenses, so reading them afterwards would silently produce empty charts.
         with _timed(timings, "query"):
-            expenses = await asyncio.to_thread(
-                query_by_prefix, f"USER#{ledger_id}", "EXPENSE#"
-            )
+            # Date-sorted, so the attached CSV reads chronologically.
+            expenses = await asyncio.to_thread(list_expenses, ledger_id)
         # FX fetch, CSV build and chart render together, since they share one call.
         with _timed(timings, "attachments"):
             pie_bytes, bar_bytes, csv_bytes = await asyncio.to_thread(
