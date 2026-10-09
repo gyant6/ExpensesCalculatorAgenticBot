@@ -557,181 +557,8 @@ Both photos are omitted if rendering fails, or if FX rates were unavailable — 
 
 ## Runbook
 
-### Deploying code
-
-```
-uv run python scripts/build_lambda.py
-uv run python scripts/deploy_lambda.py              # the bot; add "charts" for the chart function
-```
-
-For each function the deploy script uploads the zip to the artifacts bucket in 8 MB parts,
-points the function at it, waits for the update to finish, checks Lambda's `CodeSha256`
-equals the local archive's, and deletes the staged zip — whether or not the update
-succeeded; the bucket's one-day expiry catches a process that dies first. A direct
-`update-function-code --zip-file` sends the 47 MB archive as one request, and on
-9 Oct 2026 that repeatedly stalled mid-upload and failed whole, on two networks.
-
-It needs nothing per machine beyond what Terraform already uses: names, bucket, region
-and the target account come from `terraform output`, and the profile from `--profile`,
-`AWS_PROFILE`, or `aws_profile` in `terraform/local.auto.tfvars`, in that order. It
-refuses to run when the credentials belong to another account — the default profile on
-the development laptop is a different account.
-
----
-
-### Rotating the Telegram bot token
-
-Five steps, and the last two are the ones that bite. Skipping step 4 means nothing reaches
-the bot at all; skipping step 5 means messages arrive, the Lambda runs, the gateway logs a
-cheerful 200, and every reply dies with `telegram.error.InvalidToken: Unauthorized`.
-
-1. **Revoke and reissue in BotFather.** This also **clears the webhook registration** —
-   `getWebhookInfo` afterwards reports an empty `url`. The bot ID is unchanged, but the
-   delivery target is gone.
-2. **Update `.env`** for local polling.
-3. **Update the SSM parameter** so production gets the new value:
-   ```bash
-   aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token      --value "<new token>" --type SecureString --overwrite      --profile personal --region ap-southeast-1
-   ```
-   Run this from cmd, or prefix with `MSYS_NO_PATHCONV=1` in Git Bash — MSYS rewrites the
-   leading `/` of the parameter name into a Windows path, and on a write that silently
-   creates a parameter under the mangled name while the real one keeps its old value.
-4. **Re-register the webhook.** The webhook secret is independent of the bot token, so
-   reuse the stored one rather than generating a new one:
-   ```bash
-   TOKEN=$(grep '^TELEGRAM_BOT_TOKEN=' .env | cut -d= -f2- | tr -d '
-')
-   SECRET=$(MSYS_NO_PATHCONV=1 aws ssm get-parameter      --name /ExpensesCalculatorAgenticBot/webhook-secret --with-decryption      --query Parameter.Value --output text --profile personal --region ap-southeast-1)
-   URL=$(cd terraform && terraform output -raw webhook_url)
-   curl -sS "https://api.telegram.org/bot$TOKEN/setWebhook"      -d "url=$URL" -d "secret_token=$SECRET" -d "drop_pending_updates=true"
-   ```
-5. **Force a Lambda cold start.** `settings = Settings()` runs at module import and SSM is
-   read once per cold start, so warm containers keep serving the previous token until they
-   recycle. Re-pushing the code is the cleanest trigger — Terraform has `ignore_changes` on
-   `filename`, so it causes no drift:
-   ```
-   uv run python scripts/deploy_lambda.py
-   ```
-   Caching secrets at import is deliberate — fetching them per invocation would add SSM
-   latency and cost to every message — but it does mean any secret rotation needs a deploy
-   to take effect.
-
-Rotating the **webhook secret** is steps 3–5 with the `webhook-secret` parameter, and the
-same cold-start requirement applies for the same reason.
-
-### Rotating the webhook URL
-
-The URL is `https://<api-id>.execute-api…/webhook`, and the API id is random. It is not a
-credential — the secret token is — but a known URL invites traffic that costs a Lambda
-invocation per request, even when rejected with 403. Replacing the gateway issues a new
-id. Done 9 Oct 2026 after the old id was found in the repository's public history.
-
-1. In `terraform/`: `terraform apply -replace=aws_apigatewayv2_api.webhook`. Expect 5 to
-   add and 5 to destroy — the API, integration, route, stage and the Lambda permission
-   that names the API. Destroy runs first, so deliveries fail until step 2; Telegram
-   holds them and retries, so they arrive late rather than being lost.
-2. Point Telegram at the new URL with the existing secret, in PowerShell from
-   `terraform/`, reading the secrets into variables so they are never printed:
-   ```powershell
-   $url    = terraform output -raw webhook_url
-   $token  = aws ssm get-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --with-decryption --query Parameter.Value --output text --profile personal --region ap-southeast-1
-   $secret = aws ssm get-parameter --name /ExpensesCalculatorAgenticBot/webhook-secret --with-decryption --query Parameter.Value --output text --profile personal --region ap-southeast-1
-   Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$token/setWebhook" -Body @{ url = $url; secret_token = $secret }
-   ```
-   Omit `drop_pending_updates`, so updates queued during the switch are still delivered.
-3. Verify: the old host no longer resolves, a POST to the new URL without the secret
-   returns 403, and a real message gets a reply.
-
-Never write the URL into the repository; `terraform output` is its only record.
-
----
-
-### Diagnosing a silent bot
-
-Work outward from Telegram, since each layer fails differently:
-
-| Check | What it tells you |
-|---|---|
-| `getWebhookInfo` → empty `url` | Telegram has no delivery target; re-run `setWebhook` |
-| `getWebhookInfo` → `last_error_message` | Telegram reached the gateway and got an error back |
-| API Gateway access log, no entries | The delivery never arrived — DNS, registration, or Telegram-side |
-| Access log `status: 403` | The secret token did not match; the handler rejected it before processing |
-| Access log 200 but no reply in Telegram | The Lambda ran and failed after acknowledging — read its log |
-| Lambda log `InvalidToken: Unauthorized` | Warm container holding a stale token; force a cold start (step 5 above) |
-
-Everything the application logs below `ERROR` depends on the explicit `setLevel` in
-`main.py`: `logging.basicConfig` does nothing once the Lambda runtime has attached a
-handler, so without it the root logger sits at `WARNING` and every `logger.info` — the
-per-turn timing line included — is dropped in production while polling looks fine.
-
----
-
-### Setting up Terraform on a new machine
-
-State is in S3 (Phase 2, Step 8), so a fresh clone needs only the two gitignored local
-files, in both `terraform/` and `terraform/bootstrap/`:
-
-- `local.auto.tfvars` — `aws_account_id` and `aws_profile`; see the note in
-  `terraform/terraform.tfvars`
-- `backend.local.hcl` — `profile = "<the same profile>"`. Backend blocks cannot read
-  variables, so the backend needs the profile given separately
-
-Then, in each directory:
-
-```
-terraform init -backend-config=backend.local.hcl
-terraform plan
-```
-
-`plan` should show no changes. If it proposes creating resources that already exist, it is
-not reading the S3 state — check the init output named the `s3` backend.
-
----
-
-### Restoring the expenses table
-
-Point-in-time recovery keeps the table restorable to any second in the last 35 days. A
-restore never overwrites the live table — it creates a new one — so the usual repair is
-to copy the affected items back, not to switch the bot over: the Lambda's IAM policy is
-scoped to the live table's ARN, and Terraform manages that table by name.
-
-1. Pick a time just before the damage, in UTC. The bot's logs and the item's
-   `updated_at` help; `describe-continuous-backups` shows the earliest restorable time.
-2. Restore into a new table:
-   ```
-   aws dynamodb restore-table-to-point-in-time --source-table-name ExpensesCalculator --target-table-name ExpensesCalculator-restore-<yyyymmdd> --restore-date-time <2026-10-09T05:00:00Z> --profile personal --region ap-southeast-1
-   aws dynamodb wait table-exists --table-name ExpensesCalculator-restore-<yyyymmdd> --profile personal --region ap-southeast-1
-   ```
-3. Read the items you need from the restored table (`get-item` or `query` on the
-   ledger's `PK`) and write them back to `ExpensesCalculator` with `put-item`. Check the
-   ledger with "show all" afterwards.
-4. Delete the restored table once done — it is billed as a table of its own, and it is
-   not managed by Terraform.
-
-A restored table does not carry over every setting of its source; as far as I know TTL,
-PITR itself and tags must be re-enabled by hand. That does not matter for a short-lived
-copy used only to read items back.
-
----
-
-### Recovering Terraform state
-
-Each config's state is one object in `expenses-bot-tfstate-ojg0cd`: `bot/terraform.tfstate`
-and `bootstrap/terraform.tfstate`. If it is deleted or overwritten by a bad apply, restore a
-previous version first — versioning keeps superseded versions for 90 days:
-
-```
-aws s3api list-object-versions --bucket expenses-bot-tfstate-ojg0cd --prefix bot/terraform.tfstate
-aws s3api copy-object --bucket expenses-bot-tfstate-ojg0cd --key bot/terraform.tfstate --copy-source "expenses-bot-tfstate-ojg0cd/bot/terraform.tfstate?versionId=<VERSION_ID>"
-```
-
-If no usable version exists — in practice, only if the bucket itself was deleted — the
-resources are still running in AWS but Terraform has no record of them, and would plan to
-create all of them again. The last resort is to import each one into a fresh state — the
-resource blocks in `terraform/` name what to import — and not to apply anything until
-`terraform plan` shows no changes.
-
----
+Operational procedures — deploying, rotating secrets and the webhook URL, diagnosing a
+silent bot, and restoring data or Terraform state — are in [RUNBOOK.md](RUNBOOK.md).
 
 ## Environment Configuration
 
@@ -851,7 +678,8 @@ The sequence, and what each part is actually testing:
 **What this cannot reach.** Locally `render_charts` takes the in-process branch, so the
 boto3 invoke, `chart_handler` running as a Lambda, and the `lambda:InvokeFunction` grant
 are all untouched by a green run here. The payload compatibility is covered by
-`test_chart_contract.py`; the invoke itself is what the Step 4 smoke test is for.
+`test_chart_contract.py`; the invoke itself is only exercised by a real trip end in
+production, or by invoking the chart function directly after a deploy.
 
 #### Layer 3 — LLM Evaluations (`tests/evals/`)
 
@@ -983,173 +811,34 @@ default-groups = ["dev", "charts"]
 
 ## Roadmap
 
+Finished work is not listed here — git history has it, and the decisions that still
+constrain the design are in [docs/decisions/](docs/decisions/). Only open items remain.
+
 ### Phase 1 — Local Development
-- [x] Project scaffolding: `uv init`, `pyproject.toml`, `.env`, `docker-compose.yml` for DynamoDB Local
-- [x] `config.py` with pydantic-settings
-- [x] Storage layer: `dynamodb.py` — low-level DynamoDB client wrapper
-- [x] Tool implementations (trip, expenses, fx rate)
+
+Done: the bot, its tools, storage, LangGraph agent with checkpointing, access control with
+admin approval and the `/auth` commands, and local polling.
+
 - [ ] Integration tests against DynamoDB Local
-- [x] LangGraph graph: state, agent node, tools node, DynamoDB checkpointer
-- [x] System prompt engineering
-- [x] Telegram polling handler (local mode)
-- [x] `end_trip` summary: text generation + matplotlib chart
-- [x] Clear conversation history when a trip ends: `graph.checkpointer.delete_thread(thread_id)`, called from `handle_callback` and `dev_runner` after the summary and attachments have been delivered. It cannot live inside `end_trip` — `agent_node` writes the summary after the tool returns and needs the message history to do it. Wrap it so a failed deletion cannot fail the user's turn after they already have their summary
-- [x] `enable_checkpoint_compression=True` on `DynamoDBSaver`, which gzips each snapshot before writing and expands it on read (measured ~4.6x). Reduces DynamoDB read and write units only — the state reaching Bedrock is decompressed and identical, so token cost is unchanged
-- [x] `ttl_seconds` on `DynamoDBSaver`, plus TTL enabled on the table itself, so abandoned threads expire with no active code path required
-- [x] Validate and upper-case `LOG_LEVEL` at settings load, so an invalid value fails with a message naming the setting and the accepted levels rather than a bare `ValueError` raised inside the logging module at import
-- [x] Paginate `query_by_prefix` via the boto3 paginator: a DynamoDB `query` returns at most 1 MB per call, and ignoring `LastEvaluatedKey` silently returned a partial list beyond that. Covered by a unit test that crosses the real 1 MB boundary — moto enforces the same cap, and a single query returned only 83 of 120 padded items
-- [x] Store `amount` as a DynamoDB Number rather than String, using `Decimal` because boto3 refuses Python floats. Makes it numerically comparable and stops every consumer re-parsing it
-- [x] Wire up or remove `AWS_BEDROCK_PROFILE` — removed, since the Bedrock client never read it
-- [x] Harden `custom_routes` to match any `end_trip` tool call rather than only `tool_calls[0]`. A batch mixing `end_trip` with other tools now routes to `end_trip_batch_error_node`, which injects a rejecting `ToolMessage` for every call so the model retries with `end_trip` alone — neither silently skipping `end_trip` nor bypassing the confirmation interrupt
-- [x] Access control: `AUTH#<id>` DynamoDB items, PENDING/APPROVED/REJECTED states
-- [x] Admin approval flow: unknown users trigger Approve/Reject message to admin via inline keyboard
-- [x] Group ID support: approve `AUTH#<group_id>` (negative) independently of user-level access
-- [x] `ADMIN_TELEGRAM_ID` in config (env var / SSM in prod)
-- [x] Manual end-to-end testing via Telegram
-- [x] Admin command interface: `/auth` is registered as a dedicated `CommandHandler`, which PTB routes directly without passing through `handle_message` or the auth gate. The handler silently ignores the command if `effective_user.id != ADMIN_TELEGRAM_ID` — this is the sole guard, since the auth gate never runs for command handlers. Supported commands:
-  - `/auth list` — list all `AUTH#*` records with their status, entity type, and username
-  - `/auth approve <id>` — set status to APPROVED
-  - `/auth reject <id>` — set status to REJECTED
-  - `/auth delete <id>` — delete the record entirely so the entity can re-apply from scratch
 - [ ] LangSmith project setup; build initial eval datasets; run first eval baseline
 
 ### Phase 2 — AWS Deployment
 
-Tackled in order so the bot is running in prod as early as possible, with security hardening layered on after.
+Done: the bot and chart Lambdas
+([0001](docs/decisions/0001-chart-rendering-in-a-separate-lambda.md)), the HTTP API
+webhook authenticated by the secret token
+([0002](docs/decisions/0002-http-api-authenticated-by-secret-token.md)), secrets in SSM
+([0003](docs/decisions/0003-secrets-and-account-id-out-of-the-repository.md)), Terraform
+state in S3 ([0004](docs/decisions/0004-terraform-state-in-s3-bootstrap.md)),
+point-in-time recovery on the table, and S3-staged deploys
+([0009](docs/decisions/0009-deploy-through-temporary-artifacts-bucket.md)).
 
-#### Step 1 — Lambda handler (code only, no AWS resources yet)
-- [x] Adapt `main.py` to support webhook mode: `lambda_handler(event, context)` parses the Telegram JSON from the API Gateway event body and dispatches via PTB. Polling mode (`if __name__ == "__main__"`) continues to work unchanged for local dev. Both modes share `_build_app()` so handler registration is never duplicated.
-- [x] Validate handler locally with a synthetic API Gateway event payload before provisioning anything.
-
-#### Step 2 — Core infrastructure (Terraform)
-- [x] Terraform: Lambda function + IAM execution role (DynamoDB read/write + Bedrock invoke, SSM GetParameters — least-privilege)
-- [x] Terraform: prod DynamoDB table (same key schema as local, TTL enabled on `ttl` attribute)
-- [x] Sensitive secrets (`TELEGRAM_BOT_TOKEN`, `ADMIN_TELEGRAM_ID`) are stored in SSM Parameter Store as SecureString. Terraform creates the parameters with a `REPLACE_ME` placeholder and `ignore_changes = [value]`, so the real value set via CLI is never overwritten by a subsequent apply and never stored in Terraform state. Lambda env vars hold the SSM paths; `config.py` fetches and injects them into `os.environ` before pydantic-settings loads, only when `ENVIRONMENT=production`.
-- [x] Lambda packaging: `scripts/build_lambda.py` — `uv export --no-dev` → `uv pip install` → zip dependencies + src/. Dependencies are resolved for Python 3.13 on `x86_64-unknown-linux-gnu` rather than for the build machine, so a Windows or macOS build produces the same Linux artefact as the CI runner
-
-#### Step 3 — Split chart rendering into its own Lambda
-
-The first build measured **67.8 MB zipped, 197.5 MB unzipped** — past Lambda's 50 MB direct-upload limit. matplotlib, Pillow, fontTools and kiwisolver account for much of that and exist solely for the two PNGs sent at trip end. Splitting them into a second function puts both artefacts under the limit, so neither needs S3 staging.
-
-Measured after the split:
-
-| Archive | Zipped | % of the 50 MB cap | Largest components |
-|---|---:|---:|---|
-| `function.zip` | 44.9 MB | 88% | botocore 14.0, numpy 15.7, zstandard 5.3 |
-| `chart_function.zip` | 39.2 MB | 78% | matplotlib 9.3, numpy 15.7, Pillow 6.5, fontTools 4.6 |
-
-Two things this measurement corrected. **numpy stays in the main function regardless** — `langchain-aws` depends on it directly, so it is not part of what leaves with matplotlib. And the main archive sits at 88% of the cap, not the roughly 30 MB estimated before building, leaving about 5 MB of headroom. If that runs out, the lever is botocore: at 14.0 MB it is the single largest item, and the Lambda runtime already provides boto3 and botocore, so excluding them would bring the archive to about 31 MB at the cost of pinning to whatever version AWS ships.
-
-The cold-start benefit is unaffected by numpy remaining, because bytes in the artefact are not the same as modules imported. Verified directly: importing `src.bot.main` pulls in none of matplotlib, numpy, Pillow, fontTools or kiwisolver.
-
-Size is what forces the decision, but cold start is the better reason for it. `charts.py` imports matplotlib at module scope and `tools/trip.py` imports `generate_csv` from that same module, so matplotlib and numpy load on **every** cold start of the main function, including one that only records an expense. After the split the main function has no import path to matplotlib at all, and only trip end pays that cost. For a personal bot that idles long enough for containers to be reaped, most messages are cold starts, so this trades a cost on the frequent path for one on the rare path.
-
-- [x] Extract the matplotlib-free code out of `charts.py` into `src/bot/export.py`: `CSV_FIELDNAMES`, `generate_csv` and `to_sgd` (made public, since it is now shared across modules). `charts.py` keeps only the plotting functions. Imports updated in `tools/trip.py` and `telegram_handler.py`
-- [x] Move matplotlib into its own PEP 735 dependency group: `[dependency-groups] charts = [...]`, with `[tool.uv] default-groups = ["dev", "charts"]` so it stays installed locally for polling and the tests. A group rather than an optional-dependency extra because `uv export` offers `--only-group` but has no `--only-extra`, and the chart artefact must contain matplotlib and nothing else
-- [x] `scripts/build_lambda.py`: emit two archives — `function.zip` from `uv export --no-dev --no-default-groups`, `chart_function.zip` from `uv export --only-group charts` — and report both against the 50 MB limit. Both are built even if the first is oversized, so one run reports every size
-- [x] New handler `src/bot/chart_handler.py`: `lambda_handler(event, context)` taking `{"expenses": [...], "fx_rates": {...}}` and returning base64-encoded PNGs. Reads `LOG_LEVEL` straight from the environment rather than through `config.py`, which would require the bot token and admin ID this function has no business holding
-- [x] New client `src/bot/charts_client.py`: `render_charts(expenses, fx_rates)` invokes the chart function synchronously via boto3 with explicit connect and read timeouts, and returns `None` on any failure. A chart failure must not cost the user their summary or CSV — the same graceful degradation already applied when FX rates are unavailable. Decimal amounts are serialised to strings, not floats, because `to_sgd` parses them back through `Decimal` and a float round-trip would reintroduce the representation error the Number migration removed
-- [x] `src/bot/chart_protocol.py`: the four payload keys, with no imports of its own, so both sides agree on the contract without the chart function acquiring the bot's configuration or dependencies
-- [x] `config.py`: `CHART_LAMBDA_FUNCTION_NAME` and `CHART_LAMBDA_TIMEOUT_SECONDS`, plus a `PRODUCTION_ENVIRONMENT` constant replacing the `"production"` literal. Local polling renders in-process rather than invoking, via an import inside the function — `charts.py` ships in both artefacts but matplotlib does not, so a module-level import would work locally and fail at cold start in production
-- [x] Terraform: second `aws_lambda_function` for charts with its own execution role carrying CloudWatch Logs only — it touches no DynamoDB, Bedrock or SSM, and reusing the bot's role would hand a renderer full read/write access to every expense. The bot's role gains `lambda:InvokeFunction` scoped to the chart function ARN, its only cross-function permission
-- [x] Terraform: `lifecycle { ignore_changes = [filename, source_code_hash] }` on both functions, so code deployed by the AWS CLI is not rolled back by a later `terraform apply`. Terraform owns the infrastructure; the CLI owns the code. Same reasoning as the `ignore_changes` already on the SSM placeholder values
-- [x] Removed `AWS_REGION` from the bot's Lambda environment block. It is a reserved Lambda environment variable, set by the runtime, and supplying it in the function configuration is rejected at deploy time — this would have failed the first `terraform apply`. `config.py` still reads it, because the runtime provides it
-- [x] `terraform.tfvars.example`, since no variable carries a default and `apply` would otherwise prompt for all seven. The three chart timeouts are documented as an ordering — `chart_lambda_timeout < chart_client_timeout < lambda_timeout` — so a slow render is abandoned by the chart function first and the bot's client second, leaving the bot alive to deliver the summary without charts
-- [x] Verified with `terraform fmt -check` and `terraform validate` — both clean against Terraform 1.15.8 and AWS provider 5.100.0
-- [x] Corrected the Bedrock IAM resource. `AWS_BEDROCK_MODEL_ID` names a global *inference profile*, not a foundation model, and the policy granted `foundation-model/global.anthropic.claude-haiku-...` — an ARN matching nothing, so every model call would have been denied. Invoking through a profile is authorised against both the profile ARN and the foundation models it routes to, so the policy now grants both; the foundation model ID is derived by stripping the routing prefix
-- [x] Read the account ID from `data.aws_caller_identity` instead of an `aws_account_id` variable. A hand-entered ID that disagrees with the credentials in use is not an error: the IAM policies are built naming another account, grant nothing, and fail only at runtime as AccessDenied
-- [x] Commit `terraform.tfvars` rather than gitignoring it. Secrets never belonged there — they are SSM SecureStrings — and with the account ID now derived, nothing in the file is sensitive. Keeping deployment configuration out of version control leaves the repo unable to reproduce its own infrastructure
-- [x] Split the provider into `providers.tf` and guard it with `allowed_account_ids`, so Terraform refuses to plan when the credentials in use belong to another account. The account ID lives in a gitignored `local.auto.tfvars` and has no default, so a clone without that file fails asking for it rather than planning against whichever account happens to be default. It is compared, never interpolated — every ARN still comes from `data.aws_caller_identity`. Verified both ways: the wrong credentials fail with `AWS account ID not allowed`, the right ones plan 11 resources
-- [x] Commit `.terraform.lock.hcl`, which HashiCorp intends to be version-controlled. The constraint is `~> 5.0`, so without the lock a later machine resolves a different 5.x and nothing records which provider version built the running infrastructure
-- [x] Unit tests: the chart handler returns PNGs for a representative payload and rejects a malformed event; `render_charts` returns `None` and logs when the invoke is rejected, times out, reports a function error, or returns a payload missing an image
-- [x] Rebuild and confirm both archives are under 50 MB zipped and each unzipped size is under 250 MB
-- [x] `boto3-stubs[dynamodb]` → `boto3-stubs[dynamodb,lambda]` in the dev group. Without the Lambda stubs the `LambdaClient` annotation degraded to `Any` and mypy accepted both a misspelled method and a misspelled keyword argument on the `invoke` call. It matters more than usual here because that call never executes locally and the tests mock it away, so the type checker is the only thing inspecting it before production. Adding them immediately caught `InvocationType` widening to `str` instead of the literal the API accepts
-
-Constraints worth recording:
-- A synchronous invoke caps request and response at 6 MB each. This is a limit on the data passed between the two functions and is unrelated to the 50 MB deployment limit above. PNGs must be base64-encoded to travel in a JSON response, which inflates them by about a third, so the usable image budget is nearer 4.5 MB. Two charts and a small expense list sit far below that. If they ever approached it, the chart function would write the PNG to a bucket and return the object key instead of the bytes
-- Lambda allocates CPU in proportion to memory, so under-provisioning the chart function shows up as slow renders rather than as errors
-- The chart function is a pure function of its input — expenses and FX rates in, PNG bytes out. It reads no database and holds no state, which is what makes it separable at all
-
-#### Step 4 — Build and deploy
-- [x] Build both archives: `uv run python scripts/build_lambda.py`
-- [x] Deploy: `terraform apply` — 11 resources created, 0 changed, 0 destroyed
-- [x] Set real SSM values: `aws ssm put-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --value "<token>" --type SecureString --overwrite --region ap-southeast-1` (and same for admin-telegram-id). **Run these from cmd, not Git Bash** — MSYS rewrites the leading `/` of the parameter name into a Windows path, and on a write that silently creates a parameter under the mangled name while the real one keeps its placeholder. Prefix with `MSYS_NO_PATHCONV=1` if you must use Git Bash
-- [x] Push code for both functions: `aws lambda update-function-code --function-name <name> --zip-file fileb://<archive>` — not needed for the first deploy, since Terraform uploads both archives when it creates the functions; this is the path for every deploy after it
-- [x] Smoke-test: both functions invoked directly. The bot returned `{"statusCode": 200}` with no `FunctionError`, proving the Linux wheels import, the SSM secrets resolve and PTB initialises. The chart function returned two valid PNGs (30 KB and 26 KB) from a representative payload — the first real execution of `chart_handler`, of matplotlib on Linux, and of the base64 round trip
-- [x] Record `Init Duration` from the CloudWatch log for a cold start, so the cold-start cost of the split is measured rather than assumed:
-
-| Function | Init | Duration | Max memory |
-|---|---:|---:|---:|
-| bot | 4366 ms | 1343 ms | 202 MB / 1024 |
-| charts | 2431 ms | 534 ms | 135 MB / 1024 |
-
-The bot's 4.4 s init is what an ordinary message pays after an idle period, and it is now free of matplotlib, numpy, Pillow and fontTools. What it is *not* is a before-and-after: the pre-split artefact was never deployed, so the improvement remains reasoned rather than measured. Both functions use a fifth of their provisioned memory, but Lambda scales CPU with memory, so trimming it would slow the very cold start this measures — worth revisiting only with numbers behind it
-
-#### Step 5 — API Gateway + webhook
-
-An **HTTP API**, not a REST API. The two are not interchangeable here: resource policies —
-and therefore the IP allowlist in Step 6 — exist only on REST APIs, and AWS WAF does not
-support HTTP APIs either. Verified against the provider schema rather than assumed
-(`aws_apigatewayv2_api` has no `policy` attribute; `aws_api_gateway_rest_api` does). The
-control that actually authenticates a delivery is the secret token, which proves a request
-is Telegram's *and* that it is for this bot — something an IP allowlist cannot do. Moving
-to a REST API later means replacing the gateway and re-running `setWebhook`.
-
-- [x] Terraform: HTTP API Gateway (POST /webhook → Lambda integration), `$default` stage
-  with auto-deploy, JSON access logs to CloudWatch, and an `aws_lambda_permission` scoped
-  to this API's execution ARN so nothing else can invoke the bot on its behalf
-- [x] Webhook secret token, brought forward from Step 6 because it is what makes the
-  endpoint safe to expose at all: the gateway URL is not a credential, and without the
-  header anyone who learned it could POST a forged update naming the admin's Telegram ID
-  and reach the `/auth` commands. Stored in SSM under the same placeholder-and-ignore
-  pattern as the other secrets; compared with `hmac.compare_digest`; **fails closed** —
-  an unconfigured secret rejects every delivery rather than accepting them all
-- [x] Register webhook URL with Telegram (`setWebhook`) with `secret_token` and `drop_pending_updates`
-- [x] End-to-end test via Telegram: approval flow, trip start, expense, trip end with both charts and the CSV — the first production exercise of Bedrock through the inference-profile ARN and of the bot → chart-Lambda invoke, both of which worked. A forged `POST /webhook` naming the admin's Telegram ID and carrying `/auth list` was rejected with HTTP 403
-- [x] Grant `dynamodb:BatchWriteItem` and `dynamodb:BatchGetItem`. Found only in production: the checkpointer batches its reads and deletes rather than issuing one call per item, so `DeleteItem` did not cover `clear_thread_history`, which failed with `AccessDeniedException` and left 114 checkpoint items behind. Nothing surfaced to the user because that failure is deliberately swallowed — the summary and attachments are already delivered by then — which is correct behaviour but means the only signal was a CloudWatch line. Local runs could not have caught it: DynamoDB Local enforces no IAM
-
-- [x] Set the root logger level explicitly rather than relying on `logging.basicConfig`. Found in production: `basicConfig` does nothing — not even set the level — when the root logger already has a handler, and the Lambda runtime attaches one before this module imports. `LOG_LEVEL` was therefore never applied, the root logger sat at the runtime's `WARNING` default, and every `logger.info` in the application was silently dropped in production: the per-turn timing line, the duplicate-tap and expired-query messages, the charts-unavailable warning. `ERROR` came through, which is why the DynamoDB `AccessDeniedException` was visible at all. Polling was unaffected, since there no handler exists yet and `basicConfig` works normally — so this could only ever have shown up in Lambda
-
-#### Step 6 — Security hardening
-- [x] Webhook secret token: set `secret_token` at `setWebhook` registration; validate `X-Telegram-Bot-Api-Secret-Token` header in handler before processing (done in Step 5 — brought forward because the endpoint was exposed before this step)
+#### Security hardening
 - [ ] CloudWatch structured logging validation
 
-  *Dropped:* the IP allowlist from Telegram's published CIDR ranges, with its weekly
-  updater Lambda and `apigateway:UpdateRestApiPolicy` role. All three assumed a REST API
-  resource policy, and the webhook is an HTTP API, which has none (Step 5). The secret
-  token already rejects forged deliveries. An allowlist would now mean either moving to a
-  REST API — replacing the gateway and re-running `setWebhook` — or putting AWS WAF in
-  front of it, and neither is justified while the token check holds
-
-#### Step 9 — Data protection
-- [x] Enable DynamoDB point-in-time recovery on the table (`point_in_time_recovery { enabled = true }`
-  in `main.tf`): restores the table to any second in the last 35 days. The trip archive
-  only covers ending a trip; nothing previously recovered from a bad edit or delete
-  mid-trip, which the September trip showed is not hypothetical (Phase 4). Applied 9 Oct
-  2026 as a single in-place change; `describe-continuous-backups` reports PITR
-  `ENABLED` with a 35-day window, earliest restorable time 13:29 SGT that day. Cost at
-  $0.228 per GB-month on a 38.7 KB table rounds to $0.00. A restore creates a new table;
-  the runbook's "Restoring the expenses table" copies items back rather than switching
-  the bot over
-
-#### Step 7 — Bedrock Guardrails
+#### Bedrock Guardrails
 - [ ] Denied topics policy: block off-topic requests (financial advice, general chat) and keep the agent scoped to expense tracking
 - [ ] Prompt attack filter: detect injection attempts via user-supplied `source_message` (defence-in-depth against a compromised allowlisted account); guardrail ID + version added to `config.py` alongside model ID
-
-#### Step 8 — Terraform state in S3
-- [x] Migrate Terraform state to an S3 backend. The state was local and gitignored, so it existed only on the machine that last ran `apply`; another machine saw no state and would have planned to create all 18 resources again. Both configs now keep their state in `expenses-bot-tfstate-ojg0cd`:
-
-  | Key | Written by |
-  |---|---|
-  | `bootstrap/terraform.tfstate` | `terraform/bootstrap/` — the bucket itself (7 resources) |
-  | `bot/terraform.tfstate` | `terraform/` — the bot (18 resources) |
-
-  - **The bucket is its own config, `terraform/bootstrap/`,** so nothing in the main config — `terraform destroy` included — can delete the bucket holding its own state. `prevent_destroy` refuses any plan that would delete it. Its first apply necessarily ran on local state; that state was then migrated into the bucket it had just created
-  - **Bucket settings:** versioning (the S3 backend docs recommend it for recovering from a bad apply or a deletion), SSE-S3 encryption, all four Block Public Access flags, `BucketOwnerEnforced` so ACLs are disabled, a policy denying any request not made over TLS, and a lifecycle rule expiring superseded versions after 90 days. Verified against the live bucket after apply; a plain HTTP request returns 403
-  - **Locking uses `use_lockfile`, not a DynamoDB table.** The S3 backend docs mark `dynamodb_table` deprecated and say DynamoDB-based locking "will be removed in a future minor version". `required_version` is `>= 1.10` in both configs for this argument
-  - **The bucket name carries a random suffix,** not the account ID, since S3 names are global and the account ID is kept out of the repository
-  - **The AWS profile is not committed.** Backend blocks cannot read variables, so it goes in a gitignored `backend.local.hcl` passed at init — see **Setting up Terraform on a new machine** in the Runbook
-  - Verified: after migration both configs plan with no changes against state read from S3, and still do with every local state file deleted
 
 ---
 
@@ -1233,7 +922,6 @@ uv run pre-commit run --all-files
 
 #### Roadmap items
 
-- [x] `.pre-commit-config.yaml`: ruff (lint + format) + mypy
 - [ ] `[tool.coverage.run]` / `[tool.coverage.report]` sections in `pyproject.toml`; ratchet `fail_under` up from the current level towards 80
 - [ ] GitHub Actions `test.yml`: unit tests + coverage gate on every push/PR
 - [ ] GitHub Actions `deploy.yml`: OIDC credential federation, Lambda packaging, deploy on merge to main
@@ -1249,130 +937,16 @@ uv run pre-commit run --all-files
 
 ### Phase 4 — Ledger correctness (future)
 
-Failures that change the wrong expense, or lose context, without any error — so the user
-only finds out from a wrong total. The first item was observed three times on the
-September 2026 trip; the rest are consequences of scoping the ledger to the chat rather
-than the sender.
+Failures that change the wrong expense, or lose context, without any error. Done:
+addressing expenses by id ([0006](docs/decisions/0006-expenses-addressed-by-id-with-amount-check.md)),
+trip time zones ([0007](docs/decisions/0007-trip-time-zone-and-local-dates.md)), and
+dropping redelivered updates ([0008](docs/decisions/0008-redelivered-updates-dropped-by-update-id.md)).
 
-- [x] **Edits and deletes hit the wrong expense.** Done 9 Oct 2026 as designed below:
-  `EXPENSE#<id>` keys, `expense_id` + `expected_amount` on edit and delete, optional
-  `summary`, `list_expenses` sorted by date, the prompt rules, and
-  `transact_write_delete_put` removed now that date edits update in place. Observed on the September 2026 trip by reading
-  the full group history against the exported CSV:
-  - *Batched date edits* ("change 13-15 to 13 Sep", then "change 9-12 to 12 Sep"). A
-    date edit rewrites the expense's SK, which is what the list is sorted by, so the
-    expense moves and every later position in the batch points elsewhere. Seven rows
-    ended up wrong.
-  - *Picking the neighbouring line*. "Change the clothes to shopping" edited the teacup
-    one line above it, and "edit the curry to 32.19" turned the poke bowl beside it into
-    a second curry. Neither involved a date edit or a second member.
-  - *Every edit renames.* `summary` is a required parameter of `edit_expense`, so the
-    model always passes the name of the expense it meant to edit, and a misdirected edit
-    relabels the wrong row. The damage then looks like a duplicate rather than an error.
-  - *The model's repair compounds it.* Asked to restore the list, it re-added expenses
-    from memory (double-counting three and inventing a second coffee) and
-    reported "All restored!" without checking anything.
-
-  Fix (decided 8 Oct 2026):
-  - Give each expense a short immutable ID at creation and make it the sort key:
-    `EXPENSE#<id>`, four characters from an alphabet without look-alikes, generated at
-    random and written with `attribute_not_exists` so a collision retries rather than
-    overwrites. `edit_expense` and `delete_expense` take the ID instead of a list
-    position and fetch the item with one `get_item`, so a target cannot shift during a
-    batch or after a date edit. A date edit becomes a plain update, since the key no
-    longer encodes a date, and `transact_write_delete_put` leaves the edit path. The
-    creation time moves to a `created_at` attribute.
-  - The ID appears in `get_all_expenses` output, which only the model reads; the lists
-    the model writes for the user show names and numbers, not IDs.
-  - Both tools also take the expected current amount and refuse when the item with that
-    ID does not match. IDs alone do not stop the model copying the ID from the
-    neighbouring line, which is how the clothes and curry errors happened, and the amount
-    differed in every observed case (19.08 vs 4.9, 30.7 vs 29.38). An amount rather than
-    the name, because numbers are transcribed exactly where names drift in case and
-    punctuation, and a false refusal costs a retry, never data.
-  - Make `summary` optional in `edit_expense`, changed only when the user asks.
-  - Sort `get_all_expenses` by `date`, then creation time, so the numbering the user sees
-    is chronological. Today date-edited items sort by their rewritten SK and creation-time
-    items by when they were added, so 13 Sep items appeared after 14 Sep ones.
-  - System prompt: never re-add expenses the model believes are missing; show the list
-    and ask.
-  - No backfill is needed while no live trip exists; archived trips keep their old shape.
-- [x] **Default expense dates are in UTC, and the model does not know today's date.**
-  Done 9 Oct 2026 as designed below, with one addition: `tools_node` now returns through
-  `check_trip_status`, so a trip started or moved earlier in the same turn is re-read
-  before the next expense is dated. A turn that predates the change still carries
-  `message_date` in its checkpoint; the next message sets `message_time` and the old key
-  is unused.
-  `handle_message` turns the Telegram message time — UTC — straight into `message_date`,
-  the default for `add_expense`, while `start_trip` uses Singapore time. The first
-  expense of the September trip shows the mismatch: logged at 06:57 SGT on 12 Sep,
-  recorded as 11 Sep, a day before the trip began. In a zone behind UTC — Los Angeles is
-  UTC−7 in September — anything logged after 17:00 local would land on the next day. The model never sees `message_date` and the prompt never
-  states the date, so it answered "today" with "I don't have today's date" and asked for
-  dates, payment methods and categories it could have defaulted or inferred. Fix
-  (decided 8 Oct 2026):
-  - A time zone per trip. `start_trip` takes an IANA `timezone` (the model maps "Los
-    Angeles" to `America/Los_Angeles`; `zoneinfo` validates it), stored on
-    `TRIP#ACTIVE`; if the user names no place, the bot asks once. A new
-    `set_trip_timezone` tool handles "I'm in Seoul now"
-  - `handle_message` passes the full message timestamp (`message_time`, UTC ISO-8601) —
-    the message's own time, not the processing time, so a delayed or redelivered update
-    keeps its day. `check_trip_status` converts it once into `local_date` in the trip's
-    zone (Singapore when no trip is active) and writes it to state
-  - `get_system_prompt` ends with "Today is Monday, 14 September 2026
-    (America/Los_Angeles)." — after the stable prefix, so it does not break caching
-    (Phase 6). No tool: the prompt is rebuilt on every model call, and a tool would cost
-    an extra round trip. Time of day is left out until something needs it
-  - `add_expense` defaults to `local_date`, the same value the model was told
-  - Storage keeps two kinds of time apart. Moments (`created_at`, `updated_at`) stay
-    UTC ISO-8601 timestamps. The expense `date` stays a plain `YYYY-MM-DD` calendar day
-    with no time or zone — the day as lived, in the trip's zone; converting a calendar
-    day to UTC has no meaning. Each expense also stores the IANA `timezone` its `date`
-    was taken in, so a trip that moves between zones remains interpretable from the data
-    alone. Example: a message at 02:51 UTC on 15 Sep from Los Angeles (19:51 local on
-    14 Sep) is stored with `date: "2026-09-14"`, `timezone: "America/Los_Angeles"`, `created_at:
-    "2026-09-15T02:51:03…+00:00"` — today's code stores `date: "2026-09-15"`
-  - The one time-zone conversion happens in code, in `check_trip_status`. The model
-    never converts zones: it is given the local date and only does date arithmetic
-    from it ("yesterday", "Saturday")
-  - Prompt rules: never ask for the date — omit it for today and resolve "yesterday" or
-    "Tuesday" from the date line; always infer the category and ask only when genuinely
-    unsure; default the payment method to Card (the tool's default changes from Cash)
-    and do not ask
-- [ ] **Telegram redelivers updates the bot was slow to acknowledge.** The HTTP API waits
-  at most 30 s for the Lambda, then returns 503, and Telegram treats that as undelivered
-  and sends the update again — to a fresh invocation that processes it from the start.
-  Observed twice in the logs:
-  - 29 Sep, "show all expenses": the gateway log shows `status 503, responseLatency
-    30003`, followed by a second invocation (with its own cold start) for the same
-    message. The user got both the generic error and the list
-  - 7 Oct, the September trip's end: the invocation ran 34.5 s, and the "duplicate end_trip
-    confirmation" logged two seconds later was Telegram's retry, not a second tap. The
-    keyboard-removal claim stopped it, so nothing ran twice
-
-  A retried "add expense" would record the expense twice. Adds take ~10 s today, but turn
-  time grows with the history (Phase 6). Fix (decided 8 Oct 2026):
-  - **Done (9 Oct 2026)** — `src/bot/dedup.py`, claimed in `lambda_handler` after
-    authentication. Deduplicate on `update_id`, which Telegram assigns uniquely to every incoming update
-    — messages and button taps alike — and repeats unchanged on a redelivery. As the
-    first step of handling any update, a conditional put of `PK=UPDATE#<update_id>`,
-    `SK=MARKER` with a one-day `ttl`; if the marker already exists the update is a
-    redelivery, acknowledged with 200 and dropped before any model call. A separate item
-    from the expense key: one update can create several expenses, and most create none.
-    The message timestamp is unusable as the key — Telegram sends it to the second, so
-    two messages in the same second would collide, and a button tap carries the time of
-    the message it belongs to. At-most-once is deliberate: if the first run crashes
-    midway the redelivery is dropped too, and a lost message is visible (no reply) where
-    a duplicate expense is silent
-  - Shorten turns rather than restructure, first: the context bound in Phase 6 should
-    bring most turns well under the 30 s limit. Deduplication alone still lets a slow
-    turn show the generic error before its real reply arrives
-  - Deferred unless slow turns or concurrent-turn clashes persist after that: return 200
-    at once and process through an SQS FIFO queue (Lambda event source mapping, message
-    group = chat ID, deduplication ID = `update_id`). That removes the 30 s limit and
-    serialises each chat's turns, which would also fix the concurrent-turn item below.
-    Expected to sit inside SQS's free tier of 1M requests a month; the poller's idle
-    request rate is unverified and would be read from SQS metrics after deploying
+- [ ] **Turns that exceed the gateway's 30 s limit** still show the generic error before
+  their real reply, though the repeat is now dropped. First remedy: bound the context
+  (Phase 6). If slow turns persist after that, move to an SQS FIFO queue per
+  [0008](docs/decisions/0008-redelivered-updates-dropped-by-update-id.md) — which would
+  also fix the concurrent-turn item below
 - [ ] **Concurrent turns share one checkpoint thread.** Two members messaging at the same
   time produce two Lambda invocations against the same `thread_id`, each reading and
   writing the whole conversation state. Expense data is unaffected — the tools write to
