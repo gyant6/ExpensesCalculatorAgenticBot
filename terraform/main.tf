@@ -22,6 +22,14 @@ resource "aws_dynamodb_table" "expenses" {
     attribute_name = "ttl"
     enabled        = true
   }
+
+  # Continuous backups, restorable to any second in the last 35 days. The trip archive
+  # only covers ending a trip; this covers a bad edit or delete mid-trip. Billed on table
+  # size at $0.228 per GB-month in ap-southeast-1 — fractions of a cent at this scale.
+  # A restore creates a new table; see "Restoring the expenses table" in the runbook.
+  point_in_time_recovery {
+    enabled = true
+  }
 }
 
 # ── SSM Parameter Store (secrets) ─────────────────────────────────────────────

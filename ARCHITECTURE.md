@@ -626,6 +626,32 @@ not reading the S3 state — check the init output named the `s3` backend.
 
 ---
 
+### Restoring the expenses table
+
+Point-in-time recovery keeps the table restorable to any second in the last 35 days. A
+restore never overwrites the live table — it creates a new one — so the usual repair is
+to copy the affected items back, not to switch the bot over: the Lambda's IAM policy is
+scoped to the live table's ARN, and Terraform manages that table by name.
+
+1. Pick a time just before the damage, in UTC. The bot's logs and the item's
+   `updated_at` help; `describe-continuous-backups` shows the earliest restorable time.
+2. Restore into a new table:
+   ```
+   aws dynamodb restore-table-to-point-in-time --source-table-name ExpensesCalculator --target-table-name ExpensesCalculator-restore-<yyyymmdd> --restore-date-time <2026-10-09T05:00:00Z> --profile personal --region ap-southeast-1
+   aws dynamodb wait table-exists --table-name ExpensesCalculator-restore-<yyyymmdd> --profile personal --region ap-southeast-1
+   ```
+3. Read the items you need from the restored table (`get-item` or `query` on the
+   ledger's `PK`) and write them back to `ExpensesCalculator` with `put-item`. Check the
+   ledger with "show all" afterwards.
+4. Delete the restored table once done — it is billed as a table of its own, and it is
+   not managed by Terraform.
+
+A restored table does not carry over every setting of its source; as far as I know TTL,
+PITR itself and tags must be re-enabled by hand. That does not matter for a short-lived
+copy used only to read items back.
+
+---
+
 ### Recovering Terraform state
 
 Each config's state is one object in `expenses-bot-tfstate-ojg0cd`: `bot/terraform.tfstate`
