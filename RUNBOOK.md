@@ -109,9 +109,49 @@ Work outward from Telegram, since each layer fails differently:
 | Lambda log `InvalidToken: Unauthorized` | Warm container holding a stale token; force a cold start (token rotation, step 5) |
 
 Everything the application logs below `ERROR` depends on the explicit `setLevel` in
-`main.py`: `logging.basicConfig` does nothing once the Lambda runtime has attached a
-handler, so without it the root logger sits at `WARNING` and every `logger.info` — the
-per-turn timing line included — is dropped in production while polling looks fine.
+`configure_logging` (`src/bot/logging_setup.py`): `logging.basicConfig` does nothing once
+the Lambda runtime has attached a handler, so without it the root logger sits at
+`WARNING` and every `logger.info` — the per-turn record included — is dropped in
+production while polling looks fine.
+
+---
+
+## Reading a conversation from the logs
+
+Every turn the bot runs writes one JSON log line with `event = "turn"`: the chat, the
+sender, the user's message, each tool call with its arguments and result, the reply,
+model calls and tokens, timings, and the outcome (`replied`, `confirmation_asked`,
+`end_trip_failed`, `error`). Fields are described in `src/bot/turn_log.py`; the decision
+is [0014](docs/decisions/0014-structured-logs-with-a-record-per-turn.md). Lines are kept
+for the log group's 60 days.
+
+Run a Logs Insights query from the CLI (`--start-time` and `--end-time` are epoch
+seconds; the query runs asynchronously, so fetch its results with the returned id):
+
+```bash
+aws logs start-query --profile personal --region ap-southeast-1 \
+  --log-group-name /aws/lambda/ExpensesCalculatorAgenticBot \
+  --start-time $(date -d '2 days ago' +%s) --end-time $(date +%s) \
+  --query-string '<query>'
+aws logs get-query-results --profile personal --region ap-southeast-1 --query-id <id>
+```
+
+| To see | Query |
+|---|---|
+| One chat's conversation | `filter event = "turn" and chat = "<chat id>" \| fields @timestamp, user_message, reply \| sort @timestamp asc` |
+| Turns that failed | `filter event = "turn" and outcome in ["error", "end_trip_failed"] \| fields @timestamp, chat, user_message, error` |
+| A tool's calls, with arguments | `filter event = "turn" and steps.0.tool = "edit_expense" \| fields @timestamp, chat, user_message, steps.0.args.expense_id, steps.0.result` |
+| Slow turns | `filter event = "turn" and timings_ms.graph > 20000 \| fields @timestamp, chat, user_message, timings_ms.graph, model_calls` |
+| Errors with tracebacks | `filter level = "ERROR" \| fields @timestamp, message, exception` |
+
+In Git Bash on Windows, prefix both commands with `MSYS_NO_PATHCONV=1 PYTHONUTF8=1`.
+Without the first, Git Bash rewrites `/aws/lambda/...` into a Windows file path and the
+query is refused as unauthorised on that path; without the second, the CLI fails to print
+the emoji in replies.
+
+Logs Insights flattens nested JSON with dots and array positions (`steps.0.tool`), and
+discovers a bounded number of fields per line. When a field is missing from results,
+read the whole line with `fields @message`.
 
 ---
 

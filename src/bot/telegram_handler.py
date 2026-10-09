@@ -11,8 +11,9 @@ from typing import Any
 
 import httpx
 from botocore.exceptions import ClientError
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import StateSnapshot
 from pydantic import ValidationError
 from telegram import (
     Bot,
@@ -53,6 +54,7 @@ from src.bot.storage.dynamodb import (
 )
 from src.bot.tools.expenses import list_expenses
 from src.bot.tools.fx import get_sgd_exchange_rates
+from src.bot.turn_log import TurnKind, TurnOutcome, log_turn
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,10 @@ _END_TRIP_FAILED = (
     'Send "end trip" to try again.'
 )
 
+_END_TRIP_PROMPT = (
+    "Are you sure you want to end the trip? All expenses will be deleted."
+)
+
 _CSV_FILENAME = "expenses.csv"
 
 # Chat types whose ledger is shared by everyone in the conversation.
@@ -121,29 +127,14 @@ def _timed(timings: dict[str, int], phase: str) -> Iterator[None]:
         timings[phase] = round((time.perf_counter() - start) * 1000)
 
 
-def _log_timings(
-    turn: str,
-    ledger_id: str,
-    timings: dict[str, int],
-    **context: int,
-) -> None:
-    """Emit one line summarising where a turn spent its time.
+def _message_count(state: StateSnapshot) -> int:
+    """How many messages the conversation held at this snapshot.
 
-    A single line per turn rather than one per phase: the volume is then the same as no
-    instrumentation, while still carrying every phase. Logged at INFO because latency is
-    operational data wanted in production, where raising the log level to read it would
-    mean reconfiguring a running function.
-
-    Args:
-        turn: Which handler produced the timings, e.g. "message".
-        ledger_id: The user the turn belongs to, for correlation.
-        timings: Phase name to duration in milliseconds; each is suffixed `_ms`.
-        **context: Counts or other non-duration fields, logged under their own names so
-            they are not mistaken for milliseconds.
+    The graph only appends, so slicing a turn's result from this index yields exactly
+    the messages that turn added.
     """
-    fields = [f"{phase}_ms={ms}" for phase, ms in timings.items()]
-    fields += [f"{name}={value}" for name, value in context.items()]
-    logger.info("timing turn=%s user=%s %s", turn, ledger_id, " ".join(fields))
+    messages: list[BaseMessage] = state.values.get("messages", [])
+    return len(messages)
 
 
 def _ledger_id_for(update: Update) -> str | None:
@@ -496,20 +487,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Covers the Bedrock round trips, every tool's DynamoDB call, and a checkpoint write
-    # per super-step. A dominant figure here needs breaking down further before it says
-    # anything actionable.
-    with _timed(timings, "graph"):
-        result = await asyncio.to_thread(
-            _graph.invoke,
-            {
-                "messages": [HumanMessage(content=update.message.text)],
-                "ledger_id": ledger_id,
-                "message_time": message_time,
-            },
-            config,
-            durability=CHECKPOINT_DURABILITY,
+    user_message = HumanMessage(content=update.message.text)
+    turn_context: dict[str, Any] = {
+        "kind": TurnKind.MESSAGE,
+        "chat": ledger_id,
+        "sender": update.effective_user.id,
+        "update_id": update.update_id,
+        "timings": timings,
+    }
+
+    # Covers the Bedrock round trips, every tool's DynamoDB call, and the checkpoint
+    # write. A dominant figure here needs breaking down further before it says anything
+    # actionable.
+    try:
+        with _timed(timings, "graph"):
+            result = await asyncio.to_thread(
+                _graph.invoke,
+                {
+                    "messages": [user_message],
+                    "ledger_id": ledger_id,
+                    "message_time": message_time,
+                },
+                config,
+                durability=CHECKPOINT_DURABILITY,
+            )
+    except Exception as error:
+        # Logged here because the error handler sees only the traceback, not what the
+        # user asked; re-raised so it still reports the failure to the chat.
+        log_turn(
+            **turn_context,
+            outcome=TurnOutcome.ERROR,
+            new_messages=[user_message],
+            reply=None,
+            error=error,
         )
+        raise
+    new_messages = result["messages"][_message_count(state) :]
 
     with _timed(timings, "state_after"):
         state_after = await asyncio.to_thread(_graph.get_state, config)
@@ -528,10 +541,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     ]
                 ]
             )
-            await update.message.reply_text(
-                "Are you sure you want to end the trip? All expenses will be deleted.",
-                reply_markup=keyboard,
-            )
+            await update.message.reply_text(_END_TRIP_PROMPT, reply_markup=keyboard)
+            outcome, content = TurnOutcome.CONFIRMATION_ASKED, _END_TRIP_PROMPT
         else:
             last_msg = result["messages"][-1]
             content = _extract_text(last_msg.content)
@@ -539,8 +550,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 _log_empty_reply(ledger_id, last_msg)
                 content = _EMPTY_REPLY_FALLBACK
             await _reply_in_chunks(update.message, content)
+            outcome = TurnOutcome.REPLIED
 
-    _log_timings("message", ledger_id, timings)
+    log_turn(**turn_context, outcome=outcome, new_messages=new_messages, reply=content)
 
 
 async def _acknowledge_callback(query: CallbackQuery) -> None:
@@ -730,8 +742,17 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text("This confirmation has already been processed.")
         return
 
+    timings: dict[str, int] = {}
+    previous_count = _message_count(state)
+    turn_context: dict[str, Any] = {
+        "chat": ledger_id,
+        "sender": update.effective_user.id,
+        "update_id": update.update_id,
+        "timings": timings,
+    }
+
     if query.data == _END_TRIP_CONFIRM:
-        timings: dict[str, int] = {}
+        turn_context["kind"] = TurnKind.END_TRIP_CONFIRMED
 
         # Ending a trip takes several seconds — an FX fetch, chart rendering and two model
         # round trips — so say so rather than leaving the tap unacknowledged. This message
@@ -749,10 +770,21 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
                 _render_attachments, expenses, ledger_id
             )
 
-        with _timed(timings, "graph"):
-            result = await asyncio.to_thread(
-                _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
+        try:
+            with _timed(timings, "graph"):
+                result = await asyncio.to_thread(
+                    _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
+                )
+        except Exception as error:
+            log_turn(
+                **turn_context,
+                outcome=TurnOutcome.ERROR,
+                new_messages=[],
+                reply=None,
+                error=error,
             )
+            raise
+        new_messages = result["messages"][previous_count:]
 
         # Check rather than trust the resume. On 9 Oct 2026 it returned without running
         # end_trip, and the bot reported "Trip ended." and cleared the history while the
@@ -770,6 +802,13 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
             await asyncio.to_thread(
                 clear_thread_history, _graph, thread_id_for(ledger_id)
             )
+            log_turn(
+                **turn_context,
+                outcome=TurnOutcome.END_TRIP_FAILED,
+                new_messages=new_messages,
+                reply=_END_TRIP_FAILED,
+                expenses=len(expenses),
+            )
             return
 
         content = _extract_text(result["messages"][-1].content) or "Trip ended."
@@ -785,10 +824,17 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
                 clear_thread_history, _graph, thread_id_for(ledger_id)
             )
 
-        _log_timings("end_trip", ledger_id, timings, expenses=len(expenses))
+        log_turn(
+            **turn_context,
+            outcome=TurnOutcome.REPLIED,
+            new_messages=new_messages,
+            reply=content,
+            expenses=len(expenses),
+        )
     else:
+        turn_context["kind"] = TurnKind.END_TRIP_CANCELLED
         last_ai = state.values["messages"][-1]
-        tool_call_id = last_ai.tool_calls[0]["id"]
+        pending_call = last_ai.tool_calls[0]
         await asyncio.to_thread(
             _graph.update_state,
             config,
@@ -796,18 +842,39 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
                 "messages": [
                     ToolMessage(
                         content="User cancelled ending the trip.",
-                        tool_call_id=tool_call_id,
+                        tool_call_id=pending_call["id"],
+                        # Named as ToolNode names its results, so the turn record shows
+                        # which call was answered.
+                        name=pending_call["name"],
                     )
                 ]
             },
             END_TRIP_NODE,
         )
-        result = await asyncio.to_thread(
-            _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
-        )
+        try:
+            with _timed(timings, "graph"):
+                result = await asyncio.to_thread(
+                    _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
+                )
+        except Exception as error:
+            log_turn(
+                **turn_context,
+                outcome=TurnOutcome.ERROR,
+                new_messages=[],
+                reply=None,
+                error=error,
+            )
+            raise
         last_msg = result["messages"][-1]
         content = _extract_text(last_msg.content) or "Trip ending cancelled."
         await _edit_in_chunks(query, content)
+        # From the count before the cancellation was injected, so the record shows it.
+        log_turn(
+            **turn_context,
+            outcome=TurnOutcome.REPLIED,
+            new_messages=result["messages"][previous_count:],
+            reply=content,
+        )
 
 
 async def handle_auth_callback(

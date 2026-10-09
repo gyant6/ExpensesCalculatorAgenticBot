@@ -24,6 +24,7 @@ from telegram.ext import (
 
 from src.bot.config import settings
 from src.bot.dedup import claim_update
+from src.bot.logging_setup import configure_logging
 from src.bot.telegram_handler import (
     handle_admin_command,
     handle_auth_callback,
@@ -31,50 +32,9 @@ from src.bot.telegram_handler import (
     handle_message,
 )
 
-_REDACTED = "***REDACTED***"
-
-
-class _RedactingFormatter(logging.Formatter):
-    """Formatter that strips the bot token from every record it renders.
-
-    The Telegram Bot API carries the token in the URL path, so any library that logs a
-    request URL, or any traceback from a failed call, will contain it. Redacting at the
-    formatter catches all of them at once — including exception text, which a
-    logging.Filter cannot reach because the traceback is rendered here rather than
-    stored on the record.
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        rendered = super().format(record)
-        if settings.TELEGRAM_BOT_TOKEN:
-            rendered = rendered.replace(settings.TELEGRAM_BOT_TOKEN, _REDACTED)
-        return rendered
-
-
-logging.basicConfig(
-    level=settings.LOG_LEVEL,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+configure_logging(
+    settings.LOG_LEVEL, secrets=(settings.TELEGRAM_BOT_TOKEN, settings.WEBHOOK_SECRET)
 )
-
-# basicConfig does nothing at all — not even set the level — when the root logger already
-# has a handler, and the Lambda runtime attaches one before this module is imported. Under
-# polling the call above is what configures logging; in Lambda it is a no-op and this line
-# is the only thing that applies LOG_LEVEL. Without it the root logger stays at the
-# runtime's default of WARNING and every logger.info in the application is silently
-# dropped, including the per-turn timing line.
-logging.getLogger().setLevel(settings.LOG_LEVEL)
-
-for _handler in logging.getLogger().handlers:
-    _handler.setFormatter(
-        _RedactingFormatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
-
-# Third-party loggers held above INFO regardless of LOG_LEVEL. httpx logs the full
-# request URL at INFO, so every reply would otherwise write a line containing the token —
-# redacted by the formatter above, but there is no reason to emit it at all. The
-# checkpointer logs one line per chunk written, dozens per turn, burying everything else.
-for _noisy_logger in ("httpx", "httpcore", "langgraph_checkpoint_aws"):
-    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
