@@ -585,6 +585,33 @@ cheerful 200, and every reply dies with `telegram.error.InvalidToken: Unauthoriz
 Rotating the **webhook secret** is steps 3–5 with the `webhook-secret` parameter, and the
 same cold-start requirement applies for the same reason.
 
+### Rotating the webhook URL
+
+The URL is `https://<api-id>.execute-api…/webhook`, and the API id is random. It is not a
+credential — the secret token is — but a known URL invites traffic that costs a Lambda
+invocation per request, even when rejected with 403. Replacing the gateway issues a new
+id. Done 9 Oct 2026 after the old id was found in the repository's public history.
+
+1. In `terraform/`: `terraform apply -replace=aws_apigatewayv2_api.webhook`. Expect 5 to
+   add and 5 to destroy — the API, integration, route, stage and the Lambda permission
+   that names the API. Destroy runs first, so deliveries fail until step 2; Telegram
+   holds them and retries, so they arrive late rather than being lost.
+2. Point Telegram at the new URL with the existing secret, in PowerShell from
+   `terraform/`, reading the secrets into variables so they are never printed:
+   ```powershell
+   $url    = terraform output -raw webhook_url
+   $token  = aws ssm get-parameter --name /ExpensesCalculatorAgenticBot/telegram-bot-token --with-decryption --query Parameter.Value --output text --profile personal --region ap-southeast-1
+   $secret = aws ssm get-parameter --name /ExpensesCalculatorAgenticBot/webhook-secret --with-decryption --query Parameter.Value --output text --profile personal --region ap-southeast-1
+   Invoke-RestMethod -Method Post -Uri "https://api.telegram.org/bot$token/setWebhook" -Body @{ url = $url; secret_token = $secret }
+   ```
+   Omit `drop_pending_updates`, so updates queued during the switch are still delivered.
+3. Verify: the old host no longer resolves, a POST to the new URL without the secret
+   returns 403, and a real message gets a reply.
+
+Never write the URL into the repository; `terraform output` is its only record.
+
+---
+
 ### Diagnosing a silent bot
 
 Work outward from Telegram, since each layer fails differently:
