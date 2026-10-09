@@ -37,8 +37,10 @@ chunk and write items; a plain "hi" in production left 26. Ending a long trip sp
   90-day TTL remove them.
 - Context older than the budget is not seen by the model. A reference to something said
   long ago fails visibly ("which one?"), and the expense data itself is always current.
-- Prompt caching is deferred to the Haiku 5.5 move: the fixed prefix (~3.3K tokens) is
-  below Haiku 4.5's 4,096-token minimum.
+- Prompt caching is deferred to the Haiku 5.5 move. The fixed prefix is just over
+  4,100 tokens on Haiku 4.5 (measured: 4,131 for the shortest request), barely past its
+  4,096-token minimum, so a small prompt change could drop it below; Haiku 5.5's
+  minimum is 512.
 
 ## Alternatives considered
 

@@ -113,6 +113,10 @@ class Settings(BaseSettings):
     # read expenses live, so older turns are context rather than data. A September 2026
     # trip averaged ~34K input tokens per call with no bound, peaking at 90K.
     MODEL_HISTORY_TOKEN_BUDGET: int = 8_000
+    # Sampling temperature sent with every model call; None sends none, leaving the
+    # model's default. Claude Haiku 4.5 accepts it; Claude Haiku 5.5 is documented to
+    # reject any sampling parameter with a 400, so moving to it means unsetting this.
+    MODEL_TEMPERATURE: float | None = 0.3
     # How long a delivered Telegram update's marker is kept, so a redelivery of the same
     # update is recognised and dropped. Telegram's observed redeliveries arrive within
     # seconds of the original; a day leaves a wide margin at a few bytes per update.

@@ -641,6 +641,7 @@ Test each tool and storage function in complete isolation. All external dependen
 | `test_context_and_checkpointing.py` | `bounded_history` keeps a short conversation whole, cuts a long one to the budget at a user message, never separates a tool call from its result, sends an oversized current turn whole, and leaves a history with no user message untouched; `agent_node` sends the bounded history, not the full one. Against the real `DynamoDBSaver` on moto: saving once per turn writes at most 2 items, against over five times that per step; a turn saved once reloads with its whole conversation; a turn paused at the end-trip confirmation resumes and runs `end_trip`. Confirmed non-vacuous by mutation — sending the full history fails three tests, `"sync"` durability one |
 | `test_deploy_lambda.py` | The profile comes from `--profile`, then `AWS_PROFILE`, then `aws_profile` in `local.auto.tfvars`, else the default chain; Terraform outputs are read, and a missing output or failed `terraform output` points at `apply` or `init`; `code_sha256` matches Lambda's encoding; a deploy uploads, updates from S3, waits, verifies and deletes; the staged zip is deleted even when the update fails; a checksum mismatch or failed update status is not reported as success; `main` refuses credentials for another account, deploys when the account matches, and stops on a missing archive |
 | `test_update_dedup.py` | `put_item_if_absent` writes to a free key, leaves an existing item untouched and returns False, and raises other failures rather than reading them as a taken key; `claim_update` writes an expiring marker, refuses a second claim of the same `update_id`, and treats different ids independently; `lambda_handler` processes a first delivery, acknowledges a redelivery without processing it, drops a body with no `update_id`, and claims nothing for a forged delivery. Confirmed non-vacuous by mutation — skipping the claim fails one test, dropping the write's condition fails three |
+| `test_compare_models.py` | The comparison script's matching: numbers compare by value, text ignoring case, an omitted argument passes only where accepted, calls match in any order, and an extra, missing or doubly-used call fails. The scenarios themselves: names unique, every expected tool and argument exists on the bot's tools, categories and ids are real, edit amounts are the listed ones, relative dates follow from today. A run records the verdict, tokens, cache use and reasoning, and sends the bot's prompt first; a rejected request stops the run with exit code 1; invalid arguments are refused. Confirmed non-vacuous by mutation — accepting any omitted argument, fixing the call order and comparing amounts as text each fail a test |
 | `test_prompts.py` | The system prompt differs with and without an active trip, and names the trip start date when one exists; it ends with "Today is <weekday, date> (<zone>)" and everything before that line is identical from day to day; it tells the model never to ask for the date, to infer the category, to default to Card, to keep expense ids from the user and never to re-add expenses from memory |
 
 #### Layer 2 — Integration Tests (`tests/integration/`)
@@ -683,6 +684,28 @@ boto3 invoke, `chart_handler` running as a Lambda, and the `lambda:InvokeFunctio
 are all untouched by a green run here. The payload compatibility is covered by
 `test_chart_contract.py`; the invoke itself is only exercised by a real trip end in
 production, or by invoking the chart function directly after a deploy.
+
+#### Layer 2c — Model comparison (`scripts/compare_models.py`)
+
+Sends 15 fixed scenarios (`scripts/model_scenarios.py`) to a Bedrock model with the bot's
+real system prompt and tool definitions, and checks each response's tool calls against
+the expected ones: relative dates, "$" as SGD, two expenses in one message, edits and
+deletes by id with the current amount, the end-trip sequence, starting and moving trips.
+Reports pass or fail, seconds, input, output and cached tokens, and whether the model
+thought, per call. The tools never run, so nothing touches DynamoDB; a run costs cents.
+
+```
+uv run python -m scripts.compare_models --model <id> [--no-temperature] \
+    [--request-fields '<JSON for additionalModelRequestFields>'] [--runs N] [--json out.json]
+```
+
+Use it before changing the model, its settings or the system prompt. `--model` is
+required because the local `.env` need not name the model production runs.
+
+Baseline, Haiku 4.5 at temperature 0.3, two runs (9 Oct 2026): 26/30 passed, median
+2.7 s, ~4,140 input tokens per call. Both failures repeated in both runs, and are on the
+roadmap (Phase 4): "Tuesday" dated the 8th (a Thursday), and "starting a trip to Osaka"
+answered with a question instead of `start_trip`.
 
 #### Layer 3 — LLM Evaluations (`tests/evals/`)
 
@@ -960,6 +983,16 @@ dropping redelivered updates ([0008](docs/decisions/0008-redelivered-updates-dro
   typed it, so a shared ledger cannot answer "who paid for the broccoli" — which is the
   first question anyone splitting costs will ask. Needs a field on the expense item, and
   surfacing in `get_all_expenses` and the CSV
+- [ ] **Weekday names are dated wrongly.** Given "Today is Friday, 9 October 2026", Haiku
+  4.5 dated "dinner on Tuesday" 2026-10-08, a Thursday, in both baseline runs (Layer 2c).
+  "yesterday" is dated correctly. Deferred to the Haiku 5.5 comparison: fix only if 5.5
+  still fails `add_weekday`. Then the preferred fix is for `add_expense` and
+  `edit_expense` to accept a weekday name and resolve it in code to the most recent such
+  day, rather than growing the prompt with a list of dates
+- [ ] **A trip with a destination is not started.** "starting a trip to Osaka today" got
+  "where are you travelling to?" instead of `start_trip("Asia/Tokyo")`, in both baseline
+  runs. The prompt's "ask once if they have not said where" is being over-applied;
+  re-check on Haiku 5.5 before rewording it
 - [ ] **The partition key still reads `USER#<ledger_id>`** while holding a group ID. A
   rename to something neutral is a data migration, so it is deliberately deferred; the
   cheapest moment is whenever the table is next empty
@@ -995,8 +1028,8 @@ plateau rather than grow with the trip.
   bound keeps calls well below it. Required changes, each of which otherwise fails or
   degrades the first request:
   - Add prompt caching with it. The fixed prefix — system prompt and tool definitions —
-    is ~3.3K tokens (approximate), below Haiku 4.5's 4,096-token minimum, so caching does
-    nothing today; Haiku 5.5's minimum is 512. Place a `cachePoint` by hand after the
+    is just over 4,100 tokens on Haiku 4.5's tokenizer (the shortest request measured
+    4,131 in total), barely past its 4,096-token minimum; Haiku 5.5's minimum is 512. Place a `cachePoint` by hand after the
     stable part of the system prompt, before the "Today is" line. Do not use
     `ChatBedrockConverse`'s `cache_control` option: it also marks the latest message,
     which under a sliding history window pays the 25% cache-write premium on every call
@@ -1016,8 +1049,14 @@ plateau rather than grow with the trip.
     (`main.tf`, the inference-profile and foundation-model ARNs), so it follows
   - Confirm Bedrock's per-token price before switching, and re-baseline cost dashboards
     for the new tokenizer rather than reading the jump as a regression
-  - Run the manual end-to-end script (Layer 2b) against the new model first; the Layer 3
-    evals are still unbuilt
+  - Blocked on quota: the account's Haiku 5.5 tokens-per-minute quota (`L-F26CA8D1`)
+    is 0 against a default of 10M, as are Sonnet 5.5's and Opus 5.5's, so every call is
+    refused as "not available for this account". An increase to 10M was requested on
+    9 Oct 2026
+  - Compare against the Haiku 4.5 baseline with `scripts/compare_models.py` (Layer 2c):
+    thinking off, and adaptive thinking at low and at medium effort. The same runs settle
+    the request format for effort and thinking. Then run the manual end-to-end script
+    (Layer 2b) on the chosen setting; the Layer 3 evals are still unbuilt
 - [ ] **End-of-trip analysis by a larger model, from totals the code computes.** The trip
   summary is meant as analysis — patterns, where the money went, outliers — which is the
   one step where a stronger model earns its cost. On the September trip it also got the

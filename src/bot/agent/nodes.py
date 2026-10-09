@@ -22,7 +22,9 @@ from src.bot.tools import expenses, trip
 
 bedrock_client = boto3.client("bedrock-runtime", region_name=settings.AWS_REGION)
 llm = ChatBedrockConverse(
-    client=bedrock_client, model_id=settings.AWS_BEDROCK_MODEL_ID, temperature=0.3
+    client=bedrock_client,
+    model_id=settings.AWS_BEDROCK_MODEL_ID,
+    temperature=settings.MODEL_TEMPERATURE,
 )
 tools = [
     expenses.add_expense,
