@@ -1,7 +1,7 @@
 """Tests for the expense tools.
 
 Expenses are addressed by an immutable random id, with the current amount as a check.
-The regression tests at the end reproduce the three ways the September trip (Sep 2026)
+The regression tests at the end reproduce the three ways a September 2026 trip
 changed the wrong expense under positional addressing: a batch of date edits re-sorting
 the list mid-batch, the model picking the neighbouring line, and every edit renaming its
 target.
@@ -253,9 +253,7 @@ def test_edit_is_refused_when_the_amount_does_not_match(
     output = _edit("k7qm", "29.38", amount="32.19")
 
     assert (
-        "poke bowl" in output
-        and "30.7" in output
-        and "Nothing was changed" in output
+        "poke bowl" in output and "30.7" in output and "Nothing was changed" in output
     )
     assert _get("k7qm") == original
 
@@ -416,16 +414,16 @@ def test_batch_of_date_edits_changes_exactly_its_targets(
         "Transit top up": "2026-09-13",
         "Coffee": "2026-09-14",
     }
-    assert {name: e["amount"] for name, e in by_name.items()}["Transit top up"] == Decimal(
-        "7.62"
-    )
+    assert {name: e["amount"] for name, e in by_name.items()}[
+        "Transit top up"
+    ] == Decimal("7.62")
     assert _get("ffff") == untouched
 
 
 def test_neighbouring_line_is_caught_by_the_amount(
     dynamodb_table: DynamoDBClient,
 ) -> None:
-    """26 Sep: "edit curry to 32.19" edited the poke bowl beside it.
+    """26 Sep: "edit the curry to 32.19" edited the poke bowl beside it.
 
     An id copied from the wrong line still names a real expense, so ids alone would not
     catch it; the amount does.
@@ -451,9 +449,7 @@ def test_an_edit_that_names_nothing_new_cannot_relabel(
     The model had to pass a summary with every edit. A category change now leaves the
     name alone, so even a misdirected edit cannot disguise itself as a duplicate.
     """
-    _seed(
-        "t3cp", summary="Teacup", amount=Decimal("19.08"), category="Shopping"
-    )
+    _seed("t3cp", summary="Teacup", amount=Decimal("19.08"), category="Shopping")
 
     _edit("t3cp", "19.08", category="Leisure")
 

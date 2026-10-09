@@ -338,8 +338,8 @@ access request.
 
 **It applies in private chats too**, which is a deliberate trade rather than an oversight.
 In a group a mention is an address; in a DM it is more often descriptive — `lunch with
-@bobbie $12` is an expense, not a message to Bob — and that message is now dropped.
-Naming the bot anywhere overrides it, so `@ZuzuAssistantBot lunch with @bobbie $12` is
+@bob $12` is an expense, not a message to Bob — and that message is now dropped.
+Naming the bot anywhere overrides it, so `@ZuzuAssistantBot lunch with @bob $12` is
 recorded. Restricting the filter to groups is a one-line change if the DM behaviour proves
 more annoying than useful.
 
@@ -734,7 +734,7 @@ Test each tool and storage function in complete isolation. All external dependen
 |---|---|
 | `test_trip.py` | `start_trip` creates item; second `start_trip` returns error; `end_trip` returns the CSV and deletes all `EXPENSE#*` items and `TRIP#ACTIVE`; `end_trip` still exports and deletes when FX rates are unavailable, prefixing the no-SGD instruction; `end_trip` returns an error when no trip is active. Archive: every expense is copied in full with the start date and a `ttl` at the configured retention; the archive is invisible to the next trip's `EXPENSE#` queries; a failed archive write deletes nothing; an empty trip writes no archive. Confirmed non-vacuous by mutation — removing the archive fails three tests, moving it after the deletes fails one |
 | `test_config.py` | `LOG_LEVEL` is upper-cased and whitespace-stripped; the normalised value is accepted by `logging`; unknown levels raise `ValidationError` |
-| `test_expenses.py` | Ids use only the unambiguous alphabet; `add_expense` records under its id, defaults the payment method and date, retries a colliding id without overwriting, gives up after repeated collisions, and rejects invalid input; `edit_expense` updates fields in place, keeps the name unless a summary is given, edits a date without moving the key, compares `expected_amount` numerically, and refuses a mismatched amount, an unknown id, an invalid expected amount, nothing to change, or invalid values; `delete_expense` removes only its target and refuses a mismatch or unknown id; `get_all_expenses` lists ids for the model, sorted by date then creation time. Three regressions replay the Tahiti failures: the batched date edits, the neighbouring-line pick, and the rename-on-every-edit. Confirmed non-vacuous by mutation — removing the amount check fails three tests, the date sort one, the conditional write four |
+| `test_expenses.py` | Ids use only the unambiguous alphabet; `add_expense` records under its id, defaults the payment method and date, retries a colliding id without overwriting, gives up after repeated collisions, and rejects invalid input; `edit_expense` updates fields in place, keeps the name unless a summary is given, edits a date without moving the key, compares `expected_amount` numerically, and refuses a mismatched amount, an unknown id, an invalid expected amount, nothing to change, or invalid values; `delete_expense` removes only its target and refuses a mismatch or unknown id; `get_all_expenses` lists ids for the model, sorted by date then creation time. Three regressions replay the September trip's failures: the batched date edits, the neighbouring-line pick, and the rename-on-every-edit. Confirmed non-vacuous by mutation — removing the amount check fails three tests, the date sort one, the conditional write four |
 | `test_fx.py` | Successful rate fetch returns dict of rates; HTTP error raises a typed exception; unexpected response shape raises a typed exception |
 | `test_dynamodb.py` | `put_item`, `get_item`, `delete_item`, `update_item` and `query_by_prefix` against moto; `query_by_prefix` returns every item across DynamoDB's 1 MB page boundary |
 | `test_export.py` | `to_sgd` converts foreign currency, passes SGD through, and returns None for an unparseable amount or a missing rate; `generate_csv` emits the expected columns, populates `amount_sgd`, blanks it when no rate exists, and preserves the original amount and currency |
@@ -1186,27 +1186,27 @@ uv run pre-commit run --all-files
 ### Phase 4 — Ledger correctness (future)
 
 Failures that change the wrong expense, or lose context, without any error — so the user
-only finds out from a wrong total. The first item was observed three times on the Tahiti
-trip (Sep 2026); the rest are consequences of scoping the ledger to the chat rather than
-the sender.
+only finds out from a wrong total. The first item was observed three times on the
+September 2026 trip; the rest are consequences of scoping the ledger to the chat rather
+than the sender.
 
 - [x] **Edits and deletes hit the wrong expense.** Done 9 Oct 2026 as designed below:
   `EXPENSE#<id>` keys, `expense_id` + `expected_amount` on edit and delete, optional
   `summary`, `list_expenses` sorted by date, the prompt rules, and
-  `transact_write_delete_put` removed now that date edits update in place. Observed on the September trip by reading
+  `transact_write_delete_put` removed now that date edits update in place. Observed on the September 2026 trip by reading
   the full group history against the exported CSV:
   - *Batched date edits* ("change 13-15 to 13 Sep", then "change 9-12 to 12 Sep"). A
     date edit rewrites the expense's SK, which is what the list is sorted by, so the
     expense moves and every later position in the batch points elsewhere. Seven rows
     ended up wrong.
-  - *Picking the neighbouring line*. "Change the clothes to shopping" edited the Teacup
-    one line above it, and "edit curry to 32.19" turned the poke bowl beside it into
-    a second Curry. Neither involved a date edit or a second member.
+  - *Picking the neighbouring line*. "Change the clothes to shopping" edited the teacup
+    one line above it, and "edit the curry to 32.19" turned the poke bowl beside it into
+    a second curry. Neither involved a date edit or a second member.
   - *Every edit renames.* `summary` is a required parameter of `edit_expense`, so the
     model always passes the name of the expense it meant to edit, and a misdirected edit
     relabels the wrong row. The damage then looks like a duplicate rather than an error.
   - *The model's repair compounds it.* Asked to restore the list, it re-added expenses
-    from memory (double-counting three and inventing a second Coffee coffee) and
+    from memory (double-counting three and inventing a second coffee) and
     reported "All restored!" without checking anything.
 
   Fix (decided 8 Oct 2026):
@@ -1236,22 +1236,22 @@ the sender.
 - [ ] **Default expense dates are in UTC, and the model does not know today's date.**
   `handle_message` turns the Telegram message time — UTC — straight into `message_date`,
   the default for `add_expense`, while `start_trip` uses Singapore time. The first
-  Tahiti expense shows the mismatch: logged at 06:57 SGT on 12 Sep, recorded as 11 Sep,
-  a day before the trip began. In Tahiti (UTC−10), anything logged after 14:00 local
-  would land on the next day. The model never sees `message_date` and the prompt never
+  expense of the September trip shows the mismatch: logged at 06:57 SGT on 12 Sep,
+  recorded as 11 Sep, a day before the trip began. In a zone behind UTC — Los Angeles is
+  UTC−7 in September — anything logged after 17:00 local would land on the next day. The model never sees `message_date` and the prompt never
   states the date, so it answered "today" with "I don't have today's date" and asked for
   dates, payment methods and categories it could have defaulted or inferred. Fix
   (decided 8 Oct 2026):
-  - A time zone per trip. `start_trip` takes an IANA `timezone` (the model maps "Tahiti"
-    to `Pacific/Tahiti`; `zoneinfo` validates it), stored on `TRIP#ACTIVE`; if the
-    user names no place, the bot asks once. A new `set_trip_timezone` tool handles "I'm
-    in Seoul now"
+  - A time zone per trip. `start_trip` takes an IANA `timezone` (the model maps "Los
+    Angeles" to `America/Los_Angeles`; `zoneinfo` validates it), stored on
+    `TRIP#ACTIVE`; if the user names no place, the bot asks once. A new
+    `set_trip_timezone` tool handles "I'm in Seoul now"
   - `handle_message` passes the full message timestamp (`message_time`, UTC ISO-8601) —
     the message's own time, not the processing time, so a delayed or redelivered update
     keeps its day. `check_trip_status` converts it once into `local_date` in the trip's
     zone (Singapore when no trip is active) and writes it to state
   - `get_system_prompt` ends with "Today is Monday, 14 September 2026
-    (Pacific/Tahiti)." — after the stable prefix, so it does not break caching
+    (America/Los_Angeles)." — after the stable prefix, so it does not break caching
     (Phase 6). No tool: the prompt is rebuilt on every model call, and a tool would cost
     an extra round trip. Time of day is left out until something needs it
   - `add_expense` defaults to `local_date`, the same value the model was told
@@ -1260,8 +1260,8 @@ the sender.
     with no time or zone — the day as lived, in the trip's zone; converting a calendar
     day to UTC has no meaning. Each expense also stores the IANA `timezone` its `date`
     was taken in, so a trip that moves between zones remains interpretable from the data
-    alone. Example: a message at 02:51 UTC on 15 Sep from Tahiti is stored with
-    `date: "2026-09-14"`, `timezone: "Pacific/Tahiti"`, `created_at:
+    alone. Example: a message at 02:51 UTC on 15 Sep from Los Angeles (19:51 local on
+    14 Sep) is stored with `date: "2026-09-14"`, `timezone: "America/Los_Angeles"`, `created_at:
     "2026-09-15T02:51:03…+00:00"` — today's code stores `date: "2026-09-15"`
   - The one time-zone conversion happens in code, in `check_trip_status`. The model
     never converts zones: it is given the local date and only does date arithmetic
@@ -1277,7 +1277,7 @@ the sender.
   - 29 Sep, "show all expenses": the gateway log shows `status 503, responseLatency
     30003`, followed by a second invocation (with its own cold start) for the same
     message. The user got both the generic error and the list
-  - 7 Oct, the September trip end: the invocation ran 34.5 s, and the "duplicate end_trip
+  - 7 Oct, the September trip's end: the invocation ran 34.5 s, and the "duplicate end_trip
     confirmation" logged two seconds later was Telegram's retry, not a second tap. The
     keyboard-removal claim stopped it, so nothing ran twice
 

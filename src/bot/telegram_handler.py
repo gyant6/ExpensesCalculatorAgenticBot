@@ -375,7 +375,7 @@ def _addressed_to_someone_else(message: Message, bot: Bot) -> bool:
     asked for, so a message that mentions somebody other than the bot is left alone.
 
     Applies in private chats too, where a mention is more often descriptive than an
-    address — the cost of that choice is that "lunch with @bobbie $12" is ignored unless
+    address — the cost of that choice is that "lunch with @bob $12" is ignored unless
     the bot is named as well.
 
     Mentions are read from Telegram's own entities rather than by searching for "@", which
@@ -434,9 +434,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # business, so it should cost neither a DynamoDB read nor an access request.
     #
     # Applied in private chats as well as groups. That is a deliberate trade: in a DM a
-    # mention is usually descriptive rather than an address — "lunch with @bobbie $12" is
+    # mention is usually descriptive rather than an address — "lunch with @bob $12" is
     # an expense, not a message to Bob — and this drops it. Naming the bot anywhere in
-    # the message overrides that, so "@ZuzuAssistantBot lunch with @bobbie $12" is still
+    # the message overrides that, so "@ZuzuAssistantBot lunch with @bob $12" is still
     # recorded.
     if _addressed_to_someone_else(update.message, context.bot):
         logger.info("Ignoring message addressed to someone else")
