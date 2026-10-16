@@ -805,10 +805,11 @@ and update deduplication; see [0006](docs/decisions/0006-expenses-addressed-by-i
 - [ ] Assess an SQS FIFO queue for turns exceeding the gateway timeout and to serialize
   concurrent turns within each chat.
 - [ ] Add author attribution to expenses, expense lists and CSV exports.
-- [ ] Evaluate weekday-date resolution across candidate models; resolve weekday names in
-  code if model results remain unreliable.
-- [ ] Evaluate destination-based trip creation and revise the prompt if it asks for a
-  destination already supplied.
+- [ ] Evaluate relative-date interpretation with more capable models, retaining known
+  date failures in the evaluation suite. Custom date parsing and calculation tools are
+  deferred pending those evaluations.
+- [x] Clarify the trip-start prompt to infer the time zone from a supplied city without
+  redundant location questions. Implemented in code; production deployment is pending.
 - [ ] Consider a neutral ledger partition-key prefix when planning a data migration.
 
 ### Phase 5 — Enhancements (future)
@@ -833,10 +834,9 @@ Validate token use and checkpoint overhead under representative workloads.
   models, regions and request settings, isolated local storage, fixed timestamps/FX,
   outcome checks and JSON reports. Paid runs require explicit opt-in and request and
   estimated-cost limits.
-- [ ] **Evaluate GLM 4.7 Flash as an alternative chat model.** Use the shared evaluator
-  to compare correctness, latency and cost against the current model across complete
-  conversations. Verify regional availability and remaining model support before any
-  production migration.
+- [x] **Complete an initial GLM 4.7 Flash evaluation.** Compared complete conversations
+  against the current model using the shared evaluator. Further adoption work is
+  deferred due to correctness failures; re-evaluate before any production migration.
 - [ ] **Assess Claude Haiku 5.5 when available.** Compare it against the current model
   using the shared evaluator. Before migration, validate model-specific request settings,
   prompt caching, reasoning across checkpointed turns, refusal handling, pricing and
