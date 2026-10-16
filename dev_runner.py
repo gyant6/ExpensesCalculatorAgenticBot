@@ -27,14 +27,15 @@ def run(user_id: str) -> None:
     """Run the interactive REPL for the given simulated user ID.
 
     Maintains conversation state across turns via the DynamoDB checkpointer,
-    keyed by thread_id. Handles the end_trip interrupt by prompting for
+    using the same thread ID format as the Telegram handlers so copied checkpoints
+    can be resumed locally. Handles the end_trip interrupt by prompting for
     confirmation before allowing the graph to proceed.
 
     Args:
         user_id: Simulated Telegram user ID string used as the DynamoDB thread key.
     """
     graph = build_graph()
-    thread_id = thread_id_for(f"dev#{user_id}")
+    thread_id = thread_id_for(user_id)
     config = {"configurable": {"thread_id": thread_id}}
 
     print(f"Dev runner — user_id={user_id}. Type 'exit' to quit.\n")
