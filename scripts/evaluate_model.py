@@ -14,7 +14,8 @@ import json
 import statistics
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -24,7 +25,12 @@ from unittest.mock import patch
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, BaseMessage, messages_to_dict
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    ToolMessage,
+    messages_to_dict,
+)
 from langchain_core.messages.utils import count_tokens_approximately
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -62,6 +68,16 @@ class Expectation(BaseModel):
     reply_contains: list[str] = Field(default_factory=list)
     required_tools: list[str] = Field(default_factory=list)
     forbidden_tools: list[str] = Field(default_factory=list)
+    preserve_expenses: list[str] = Field(default_factory=list)
+    tool_results_contain: list[str] = Field(default_factory=list)
+
+
+class AmountConflict(BaseModel):
+    """Simulate a concurrent amount change before the first valid edit/delete check."""
+
+    model_config = ConfigDict(extra="forbid")
+    summary: str = Field(min_length=1)
+    amount: Decimal = Field(gt=0, allow_inf_nan=False)
 
 
 class Step(BaseModel):
@@ -72,6 +88,7 @@ class Step(BaseModel):
     text: str | None = None
     message_time: AwareDatetime
     expected: Expectation
+    amount_conflict: AmountConflict | None = None
 
     @model_validator(mode="after")
     def check_text(self) -> Step:
@@ -208,6 +225,73 @@ def _expense_signature(item: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+@contextmanager
+def _amount_conflict(
+    ledger_id: str, conflict: AmountConflict | None
+) -> Iterator[dict[str, bool]]:
+    """Change only the named local expense once, then run the real amount guard.
+
+    The evaluator supplies isolated storage. A configured conflict must be triggered
+    and cause a genuine stale-amount refusal to count as exercised. All patches are
+    restored when the turn finishes or raises.
+    """
+    from src.bot.storage import dynamodb
+    from src.bot.tools import expenses
+
+    outcome = {"applied": False, "rejected": False}
+    if conflict is None:
+        yield outcome
+        return
+    original = expenses._load_for_change
+
+    def load(
+        requested_ledger: str, expense_id: str, expected_amount: str
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Inject once after a valid lookup, emulating a stale read of the amount."""
+        item, error = original(requested_ledger, expense_id, expected_amount)
+        if (
+            not outcome["applied"]
+            and requested_ledger == ledger_id
+            and item is not None
+            and item["summary"].casefold() == conflict.summary.casefold()
+            and Decimal(str(item["amount"])) != conflict.amount
+        ):
+            dynamodb.update_item(item["PK"], item["SK"], {"amount": conflict.amount})
+            outcome["applied"] = True
+            item, error = original(requested_ledger, expense_id, expected_amount)
+            outcome["rejected"] = item is None and error is not None
+        return item, error
+
+    with patch.object(expenses, "_load_for_change", side_effect=load):
+        yield outcome
+
+
+def _preserved_expenses(
+    before: list[dict[str, Any]], after: list[dict[str, Any]], summaries: list[str]
+) -> bool:
+    """Compare complete records, including IDs and audit fields, for named expenses."""
+    for summary in summaries:
+        original = sorted(
+            (
+                item
+                for item in before
+                if item["summary"].casefold() == summary.casefold()
+            ),
+            key=lambda item: item["SK"],
+        )
+        current = sorted(
+            (
+                item
+                for item in after
+                if item["summary"].casefold() == summary.casefold()
+            ),
+            key=lambda item: item["SK"],
+        )
+        if not original or current != original:
+            return False
+    return True
+
+
 def run_scenario(
     graph: CompiledStateGraph,  # type: ignore[type-arg]
     scenario: Scenario,
@@ -250,9 +334,16 @@ def run_scenario(
             "message_time": step.message_time.isoformat(),
         }
         result["steps"].append(entry)
+        if step.amount_conflict is not None:
+            entry["amount_conflict"] = step.amount_conflict.model_dump(mode="json")
         started = time.perf_counter()
         ended = False
         try:
+            before_expenses = (
+                expenses.list_expenses(ledger_id)
+                if step.expected.preserve_expenses
+                else []
+            )
             with (
                 patch.object(trip, "get_sgd_exchange_rates", return_value=fx_rates),
                 patch.object(
@@ -261,6 +352,7 @@ def run_scenario(
                     return_value=step.message_time.isoformat(timespec="microseconds"),
                 ),
                 patch.object(trip, "datetime", wraps=datetime) as clock,
+                _amount_conflict(ledger_id, step.amount_conflict) as conflict,
             ):
                 clock.now.return_value = step.message_time
                 try:
@@ -288,6 +380,8 @@ def run_scenario(
                     new_messages = []
                     entry.update(reply=str(error), blocked=True)
             entry["messages"] = messages_to_dict(new_messages)
+            if step.amount_conflict is not None:
+                entry["amount_conflict"].update(conflict)
             # Capturing the reply is the evaluator's delivery boundary.
             if ended:
                 clear_thread_history(graph, thread_id_for(ledger_id))
@@ -303,6 +397,11 @@ def run_scenario(
                 for message in new_messages
                 if isinstance(message, AIMessage)
                 for call in message.tool_calls
+            ]
+            tool_results = [
+                str(message.content)
+                for message in new_messages
+                if isinstance(message, ToolMessage)
             ]
             checks = {
                 "trip_active": (active is not None) == expected.trip_active,
@@ -327,6 +426,18 @@ def run_scenario(
                 "forbidden_tools": all(
                     tool not in tools for tool in expected.forbidden_tools
                 ),
+                "preserved_expenses": _preserved_expenses(
+                    before_expenses, stored, expected.preserve_expenses
+                ),
+                "tool_results": all(
+                    any(
+                        text.casefold() in content.casefold()
+                        for content in tool_results
+                    )
+                    for text in expected.tool_results_contain
+                ),
+                "amount_conflict": step.amount_conflict is None
+                or (conflict["applied"] and conflict["rejected"]),
                 "history_cleared_after_end": not ended
                 or not state.values.get("messages"),
             }

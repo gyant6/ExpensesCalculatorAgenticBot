@@ -94,6 +94,1170 @@
         {"text": "Start trip", "message_time": "2026-10-09T03:00:00Z", "expected": {"trip_active": false, "forbidden_tools": ["start_trip", "add_expense"]}},
         {"text": "Taipei", "message_time": "2026-10-09T03:01:00Z", "expected": {"trip_active": true, "timezone": "Asia/Taipei", "required_tools": ["start_trip"]}}
       ]
+    },
+    {
+      "name": "targeted_delete",
+      "steps": [
+        {
+          "text": "Start a trip to Tokyo",
+          "message_time": "2026-10-09T03:00:00Z",
+          "expected": {"trip_active": true, "expenses": [], "required_tools": ["start_trip"], "timezone": "Asia/Tokyo"}
+        },
+        {
+          "text": "Airport train 1800 yen by card, city train 1800 yen by card and tea 300 yen cash",
+          "message_time": "2026-10-09T03:01:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport train", "amount": "1800", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "City train", "amount": "1800", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Tea", "amount": "300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "required_tools": ["add_expense"]
+          }
+        },
+        {
+          "text": "Delete only the city train expense; keep the airport train and tea",
+          "message_time": "2026-10-09T03:02:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport train", "amount": "1800", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Tea", "amount": "300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "preserve_expenses": ["Airport train", "Tea"],
+            "required_tools": ["delete_expense"],
+            "forbidden_tools": ["add_expense", "edit_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses",
+          "message_time": "2026-10-09T03:03:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport train", "amount": "1800", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Tea", "amount": "300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "preserve_expenses": ["Airport train", "Tea"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "expense_corrections",
+      "steps": [
+        {
+          "text": "Start a trip to Tokyo",
+          "message_time": "2026-10-09T03:00:00Z",
+          "expected": {"trip_active": true, "expenses": [], "required_tools": ["start_trip"], "timezone": "Asia/Tokyo"}
+        },
+        {
+          "text": "Taxi 2400 yen by card, dinner 3200 yen by card and water 150 yen cash",
+          "message_time": "2026-10-09T03:01:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Taxi", "amount": "2400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "3200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "150", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "required_tools": ["add_expense"]
+          }
+        },
+        {
+          "text": "The taxi was actually 2600 yen; change only its amount",
+          "message_time": "2026-10-09T03:02:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Taxi", "amount": "2600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "3200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "150", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "preserve_expenses": ["Dinner", "Water"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Move the taxi expense to 2026-10-08; keep its other details",
+          "message_time": "2026-10-09T03:03:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Taxi", "amount": "2600", "currency": "JPY", "category": "Transport", "date": "2026-10-08", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "3200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "150", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "preserve_expenses": ["Dinner", "Water"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Dinner was paid in cash, not by card; change only its payment method",
+          "message_time": "2026-10-09T03:04:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Taxi", "amount": "2600", "currency": "JPY", "category": "Transport", "date": "2026-10-08", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "3200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Water", "amount": "150", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "preserve_expenses": ["Taxi", "Water"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses",
+          "message_time": "2026-10-09T03:05:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Taxi", "amount": "2600", "currency": "JPY", "category": "Transport", "date": "2026-10-08", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "3200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Water", "amount": "150", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+            ],
+            "preserve_expenses": ["Taxi", "Dinner", "Water"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "stale_amount_recovery",
+      "steps": [
+        {
+          "text": "Start a trip to Tokyo",
+          "message_time": "2026-10-09T03:00:00Z",
+          "expected": {"trip_active": true, "expenses": [], "required_tools": ["start_trip"], "timezone": "Asia/Tokyo"}
+        },
+        {
+          "text": "Lunch 1200 yen by card and train 300 yen by card",
+          "message_time": "2026-10-09T03:01:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "300", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "required_tools": ["add_expense"]
+          }
+        },
+        {
+          "text": "Change only lunch to cash; keep its current amount and all other fields",
+          "message_time": "2026-10-09T03:02:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Lunch", "amount": "1300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Train", "amount": "300", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Train"],
+            "required_tools": ["edit_expense", "get_all_expenses"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"],
+            "tool_results_contain": ["Nothing was changed", "Edit expense successful."]
+          },
+          "amount_conflict": {"summary": "Lunch", "amount": "1300"}
+        },
+        {
+          "text": "Show all expenses",
+          "message_time": "2026-10-09T03:03:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Lunch", "amount": "1300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Train", "amount": "300", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Lunch", "Train"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "long_conversation",
+      "steps": [
+        {
+          "text": "Start a trip to Tokyo",
+          "message_time": "2026-10-09T03:00:00Z",
+          "expected": {"trip_active": true, "expenses": [], "required_tools": ["start_trip"], "timezone": "Asia/Tokyo"}
+        },
+        {
+          "text": "Airport bus 1400 yen by card",
+          "message_time": "2026-10-09T03:01:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Breakfast 650 yen by card",
+          "message_time": "2026-10-09T03:02:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Metro 250 yen by card",
+          "message_time": "2026-10-09T03:03:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so far",
+          "message_time": "2026-10-09T03:04:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Museum ticket 1800 yen by card",
+          "message_time": "2026-10-09T03:05:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Lunch 950 yen by card",
+          "message_time": "2026-10-09T03:06:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Coffee 420 yen by card",
+          "message_time": "2026-10-09T03:07:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so far",
+          "message_time": "2026-10-09T03:08:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Hotel 12000 yen by card",
+          "message_time": "2026-10-09T03:09:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Dinner 2300 yen by card",
+          "message_time": "2026-10-09T03:10:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Water 160 yen by card",
+          "message_time": "2026-10-09T03:11:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so far",
+          "message_time": "2026-10-09T03:12:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Train 1100 yen by card",
+          "message_time": "2026-10-09T03:13:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Souvenir 2400 yen by card",
+          "message_time": "2026-10-09T03:14:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Bakery 580 yen by card",
+          "message_time": "2026-10-09T03:15:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so far",
+          "message_time": "2026-10-09T03:16:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Taxi 3100 yen by card",
+          "message_time": "2026-10-09T03:17:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Pharmacy 1700 yen by card",
+          "message_time": "2026-10-09T03:18:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Park ticket 900 yen by card",
+          "message_time": "2026-10-09T03:19:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so far",
+          "message_time": "2026-10-09T03:20:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Ferry 1600 yen by card",
+          "message_time": "2026-10-09T03:21:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Book 1350 yen by card",
+          "message_time": "2026-10-09T03:22:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Laundry 700 yen by card",
+          "message_time": "2026-10-09T03:23:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book"],
+            "required_tools": ["add_expense"],
+            "forbidden_tools": ["edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so far",
+          "message_time": "2026-10-09T03:24:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "12000", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "The hotel receipt says 11900 yen; change only its amount",
+          "message_time": "2026-10-09T03:25:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so I can check the updated receipts",
+          "message_time": "2026-10-09T03:26:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Move the souvenir to Misc category; keep everything else",
+          "message_time": "2026-10-09T03:27:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so I can check the updated receipts",
+          "message_time": "2026-10-09T03:28:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "The pharmacy purchase was paid in cash; change only its payment method",
+          "message_time": "2026-10-09T03:29:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so I can check the updated receipts",
+          "message_time": "2026-10-09T03:30:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Move laundry to 2026-10-08; keep everything else",
+          "message_time": "2026-10-09T03:31:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so I can check the updated receipts",
+          "message_time": "2026-10-09T03:32:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1600", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "The ferry receipt says 1700 yen; change only its amount",
+          "message_time": "2026-10-09T03:33:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1700", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Book", "Laundry"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all expenses so I can check the updated receipts",
+          "message_time": "2026-10-09T03:34:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1400", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1700", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Change the airport bus from the start of this trip to 1500 yen; keep everything else",
+          "message_time": "2026-10-09T03:35:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1500", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1700", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Breakfast", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Move breakfast from the start of this trip to 2026-10-08; keep everything else",
+          "message_time": "2026-10-09T03:36:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1500", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-08", "payment_method": "Card"},
+              {"summary": "Metro", "amount": "250", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1700", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Metro", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Delete only the metro expense from the start of this trip; it was a duplicate",
+          "message_time": "2026-10-09T03:37:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1500", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-08", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1700", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["delete_expense"],
+            "forbidden_tools": ["add_expense", "edit_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Change only the coffee payment method to cash",
+          "message_time": "2026-10-09T03:38:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1500", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-08", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1700", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Museum ticket", "Lunch", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["edit_expense"],
+            "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]
+          }
+        },
+        {
+          "text": "Show all my expenses; do not restore anything that was deleted",
+          "message_time": "2026-10-09T03:39:00Z",
+          "expected": {
+            "trip_active": true,
+            "expenses": [
+              {"summary": "Airport bus", "amount": "1500", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Breakfast", "amount": "650", "currency": "JPY", "category": "Food", "date": "2026-10-08", "payment_method": "Card"},
+              {"summary": "Museum ticket", "amount": "1800", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Lunch", "amount": "950", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Coffee", "amount": "420", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Hotel", "amount": "11900", "currency": "JPY", "category": "Accommodation", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Dinner", "amount": "2300", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Water", "amount": "160", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Train", "amount": "1100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Souvenir", "amount": "2400", "currency": "JPY", "category": "Misc", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Bakery", "amount": "580", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Taxi", "amount": "3100", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Pharmacy", "amount": "1700", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Cash"},
+              {"summary": "Park ticket", "amount": "900", "currency": "JPY", "category": "Leisure", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Ferry", "amount": "1700", "currency": "JPY", "category": "Transport", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Book", "amount": "1350", "currency": "JPY", "category": "Shopping", "date": "2026-10-09", "payment_method": "Card"},
+              {"summary": "Laundry", "amount": "700", "currency": "JPY", "category": "Misc", "date": "2026-10-08", "payment_method": "Card"}
+            ],
+            "preserve_expenses": ["Airport bus", "Breakfast", "Museum ticket", "Lunch", "Coffee", "Hotel", "Dinner", "Water", "Train", "Souvenir", "Bakery", "Taxi", "Pharmacy", "Park ticket", "Ferry", "Book", "Laundry"],
+            "required_tools": ["get_all_expenses"],
+            "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]
+          }
+        }
+      ]
     }
   ]
 }

@@ -665,8 +665,16 @@ read of the active-trip marker. Model injection changes the model called by
 The evaluator runs fictional conversations from `scripts/evaluation_scenarios.json`,
 with fixed message timestamps and FX rates. Each turn checks the complete expected
 expense set, active-trip state, pending confirmation and any configured reply/tool
-requirements. Scenarios cover multiple expenses, targeted edits, confirmation,
-cancellation, time-zone changes, relative dates and destination clarification.
+requirements. The eleven scenarios cover multiple expenses, targeted edits and
+deletion, amount/date/payment corrections, confirmation, cancellation, time-zone
+changes, relative dates, destination clarification, stale-amount recovery and a longer
+conversation. The longer case has 40 user messages and 18 expenses, revisits early
+records after repeated listings, and finishes with 17 expenses after a deletion.
+
+Configured preservation checks compare entire records, including IDs and audit fields,
+to detect unintended writes to unrelated expenses. The recovery case injects one amount
+change in isolated storage before an edit, exercising the real stale-amount refusal,
+re-reading and retry. Reports record whether the conflict was applied and refused.
 
 Print a plan without database or model requests:
 
@@ -690,10 +698,12 @@ The cost limit uses an input estimate and maximum output allowance before each c
 it is an estimated-cost guard, not an AWS billing cap. Failed requests retain a
 conservative cost reservation when usage is unavailable.
 
-Mocked-model tests use the real graph, tools and DynamoDB checkpointer with moto.
-Broader deletion/error-recovery scenarios, numerical summary checks and a LangSmith
-integration remain future work. The evaluator does not test Telegram delivery or chart
-attachments.
+Mocked-model tests use the real graph, tools and DynamoDB checkpointer with moto. The
+longer scripted conversation crosses the unchanged 8,000-token history limit and checks
+that earlier expenses remain retrievable after history trimming and checkpoint reload.
+Live-model consistency still needs repeated paid runs. Provider/storage failure recovery,
+numerical summary checks and a LangSmith integration remain future work. The evaluator
+does not test Telegram delivery or chart attachments.
 
 ### Coverage
 
