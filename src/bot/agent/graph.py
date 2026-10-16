@@ -1,6 +1,7 @@
 """Compiled LangGraph agent graph for the expenses bot."""
 
 import logging
+from functools import partial
 from typing import Final
 
 from botocore.exceptions import ClientError
@@ -11,7 +12,7 @@ from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph_checkpoint_aws import DynamoDBSaver
 
-from src.bot.agent.nodes import agent_node, check_trip_status
+from src.bot.agent.nodes import ChatModel, agent_node, check_trip_status
 from src.bot.agent.state import AgentState
 from src.bot.config import settings
 from src.bot.tools import expenses, trip
@@ -145,7 +146,11 @@ def end_trip_batch_error_node(state: AgentState) -> dict[str, list[ToolMessage]]
     }
 
 
-def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
+def build_graph(
+    *,
+    model: ChatModel | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,  # type: ignore[type-arg]
+) -> CompiledStateGraph:  # type: ignore[type-arg]
     """Build and compile the LangGraph agent graph.
 
     Graph flow:
@@ -157,13 +162,19 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
     started or moved to another time zone earlier in the turn is re-read — with its local
     date — before the model's next step.
 
+    Args:
+        model: Optional tool-bound model for evaluation; production is the default.
+        checkpointer: Optional isolated saver; defaults to configured DynamoDB storage.
+
     Returns:
         The compiled LangGraph application ready to invoke with AgentState.
     """
     workflow = StateGraph(AgentState)
 
     workflow.add_node("check_trip_status", check_trip_status)
-    workflow.add_node("agent_node", agent_node)
+    workflow.add_node(
+        "agent_node", agent_node if model is None else partial(agent_node, model=model)
+    )
     workflow.add_node(
         "tools_node",
         ToolNode(
@@ -197,18 +208,19 @@ def build_graph() -> CompiledStateGraph:  # type: ignore[type-arg]
     workflow.add_edge(END_TRIP_NODE, "agent_node")
     workflow.add_edge("end_trip_batch_error_node", "agent_node")
 
-    checkpointer = DynamoDBSaver(
-        table_name=settings.DYNAMODB_TABLE_NAME,
-        endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
-        region_name=settings.AWS_REGION,
-        # Each checkpoint is a full snapshot of the message history, and one is kept per
-        # turn until the trip ends. Compression cuts the DynamoDB write and read units
-        # that costs; it does not affect the tokens sent to Bedrock.
-        enable_checkpoint_compression=True,
-        # Writes a `ttl` epoch attribute on every checkpoint. DynamoDB's TTL process
-        # deletes items past that timestamp, cleaning up abandoned threads automatically.
-        ttl_seconds=settings.CHECKPOINT_TTL_SECONDS,
-    )
+    if checkpointer is None:
+        checkpointer = DynamoDBSaver(
+            table_name=settings.DYNAMODB_TABLE_NAME,
+            endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
+            region_name=settings.AWS_REGION,
+            # Each checkpoint is a full snapshot of the message history, and one is kept per
+            # turn until the trip ends. Compression cuts the DynamoDB write and read units
+            # that costs; it does not affect the tokens sent to Bedrock.
+            enable_checkpoint_compression=True,
+            # Writes a `ttl` epoch attribute on every checkpoint. DynamoDB's TTL process
+            # deletes items past that timestamp, cleaning up abandoned threads automatically.
+            ttl_seconds=settings.CHECKPOINT_TTL_SECONDS,
+        )
 
     graph = workflow.compile(
         checkpointer=checkpointer, interrupt_before=[END_TRIP_NODE]

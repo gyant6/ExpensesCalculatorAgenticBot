@@ -1,7 +1,7 @@
 """LangGraph node functions for the expenses bot agent graph."""
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol
 
 import boto3
 from langchain_aws import ChatBedrockConverse
@@ -20,12 +20,6 @@ from src.bot.storage.dynamodb import get_item
 from src.bot.timezones import DEFAULT_TIMEZONE, local_date
 from src.bot.tools import expenses, trip
 
-bedrock_client = boto3.client("bedrock-runtime", region_name=settings.AWS_REGION)
-llm = ChatBedrockConverse(
-    client=bedrock_client,
-    model_id=settings.AWS_BEDROCK_MODEL_ID,
-    temperature=settings.MODEL_TEMPERATURE,
-)
 tools = [
     expenses.add_expense,
     expenses.edit_expense,
@@ -36,7 +30,32 @@ tools = [
     trip.end_trip,
 ]
 
-llm_with_tools = llm.bind_tools(tools)
+
+class ChatModel(Protocol):
+    """The tool-bound model interface used by the graph and evaluator."""
+
+    def invoke(self, messages: list[BaseMessage], /) -> BaseMessage:
+        """Return the next assistant message, or raise the provider's error."""
+        ...
+
+
+llm_with_tools: ChatModel | None = None
+
+
+def _default_model() -> ChatModel:
+    """Initialize the configured model only when production/default inference needs it.
+
+    Injected evaluation models must not initialize clients with a different default
+    AWS profile. Client/configuration errors propagate to the calling turn.
+    """
+    global llm_with_tools
+    if llm_with_tools is None:
+        llm_with_tools = ChatBedrockConverse(
+            client=boto3.client("bedrock-runtime", region_name=settings.AWS_REGION),
+            model_id=settings.AWS_BEDROCK_MODEL_ID,
+            temperature=settings.MODEL_TEMPERATURE,
+        ).bind_tools(tools)
+    return llm_with_tools
 
 
 def check_trip_status(state: AgentState) -> dict[str, Any]:
@@ -103,7 +122,7 @@ def bounded_history(
     return window or list(messages[last_user:])
 
 
-def agent_node(state: AgentState) -> dict[str, Any]:
+def agent_node(state: AgentState, *, model: ChatModel | None = None) -> dict[str, Any]:
     """Invoke the LLM with the current message history and system prompt.
 
     Builds a system prompt reflecting whether the user has an active trip, then
@@ -112,6 +131,7 @@ def agent_node(state: AgentState) -> dict[str, Any]:
     requests.
 
     Args:
+        model: Optional tool-bound model; defaults to the production model.
         state: Current agent state containing messages, plus the trip_start_date,
             trip_timezone and local_date written by check_trip_status.
 
@@ -129,6 +149,7 @@ def agent_node(state: AgentState) -> dict[str, Any]:
     history = bounded_history(
         list(state["messages"]), settings.MODEL_HISTORY_TOKEN_BUDGET
     )
-    response = llm_with_tools.invoke([sys_prompt, *history])
+    selected = model if model is not None else _default_model()
+    response = selected.invoke([sys_prompt, *history])
 
     return {"messages": [response]}

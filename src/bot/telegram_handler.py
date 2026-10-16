@@ -7,11 +7,12 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 import httpx
 from botocore.exceptions import ClientError
-from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import StateSnapshot
 from pydantic import ValidationError
@@ -28,7 +29,6 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from src.bot.agent.graph import (
-    CHECKPOINT_DURABILITY,
     END_TRIP_NODE,
     build_graph,
     clear_thread_history,
@@ -44,6 +44,13 @@ from src.bot.auth import (
 )
 from src.bot.charts_client import render_charts
 from src.bot.config import settings
+from src.bot.conversation import (
+    cancel_end_trip,
+    config_for,
+    confirm_end_trip,
+    extract_text,
+    send_message,
+)
 from src.bot.export import generate_csv
 from src.bot.storage.dynamodb import (
     delete_item,
@@ -161,7 +168,7 @@ def _ledger_id_for(update: Update) -> str | None:
 
 def _config(ledger_id: str) -> RunnableConfig:
     """Build the graph config that scopes checkpointed state to one ledger's thread."""
-    return {"configurable": {"thread_id": thread_id_for(ledger_id)}}
+    return config_for(ledger_id)
 
 
 def _extract_text(content: str | list[Any]) -> str:
@@ -176,14 +183,7 @@ def _extract_text(content: str | list[Any]) -> str:
     Returns:
         The concatenated text from all text-type blocks, or the original string.
     """
-    if isinstance(content, str):
-        return content
-    texts = [
-        block["text"]
-        for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
-    return "\n".join(texts)
+    return extract_text(content)
 
 
 def _split_message(content: str) -> list[str]:
@@ -502,14 +502,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         with _timed(timings, "graph"):
             result = await asyncio.to_thread(
-                _graph.invoke,
-                {
-                    "messages": [user_message],
-                    "ledger_id": ledger_id,
-                    "message_time": message_time,
-                },
-                config,
-                durability=CHECKPOINT_DURABILITY,
+                send_message,
+                _graph,
+                ledger_id,
+                update.message.text,
+                message_time,
+                state=state,
             )
     except Exception as error:
         # Logged here because the error handler sees only the traceback, not what the
@@ -772,9 +770,14 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
 
         try:
             with _timed(timings, "graph"):
-                result = await asyncio.to_thread(
-                    _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
+                confirmation = await asyncio.to_thread(
+                    confirm_end_trip,
+                    _graph,
+                    ledger_id,
+                    state=state,
+                    trip_reader=partial(get_item, consistent_read=True),
                 )
+                result = confirmation.result
         except Exception as error:
             log_turn(
                 **turn_context,
@@ -789,8 +792,7 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         # Check rather than trust the resume. On 9 Oct 2026 it returned without running
         # end_trip, and the bot reported "Trip ended." and cleared the history while the
         # trip and its expenses were untouched.
-        trip = await asyncio.to_thread(get_item, f"USER#{ledger_id}", "TRIP#ACTIVE")
-        if trip is not None:
+        if not confirmation.trip_ended:
             logger.error(
                 "end_trip did not run on resume for ledger %s; the trip is still active",
                 ledger_id,
@@ -833,28 +835,13 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
         )
     else:
         turn_context["kind"] = TurnKind.END_TRIP_CANCELLED
-        last_ai = state.values["messages"][-1]
-        pending_call = last_ai.tool_calls[0]
-        await asyncio.to_thread(
-            _graph.update_state,
-            config,
-            {
-                "messages": [
-                    ToolMessage(
-                        content="User cancelled ending the trip.",
-                        tool_call_id=pending_call["id"],
-                        # Named as ToolNode names its results, so the turn record shows
-                        # which call was answered.
-                        name=pending_call["name"],
-                    )
-                ]
-            },
-            END_TRIP_NODE,
-        )
         try:
             with _timed(timings, "graph"):
                 result = await asyncio.to_thread(
-                    _graph.invoke, None, config, durability=CHECKPOINT_DURABILITY
+                    cancel_end_trip,
+                    _graph,
+                    ledger_id,
+                    state=state,
                 )
         except Exception as error:
             log_turn(

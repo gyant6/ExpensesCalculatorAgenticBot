@@ -38,13 +38,16 @@ ExpensesCalculatorAgenticBot/
 │   ├── build_lambda.py
 │   ├── deploy_lambda.py
 │   ├── compare_models.py         # first-response model comparison
-│   └── model_scenarios.py
+│   ├── model_scenarios.py
+│   ├── evaluate_model.py         # complete conversations using shared operations
+│   └── evaluation_scenarios.json
 ├── src/bot/
 │   ├── main.py                   # local polling and Lambda webhook entry point
 │   ├── agent/                    # graph, nodes, state and system prompt
 │   ├── tools/                    # trip, expense and FX operations
 │   ├── storage/dynamodb.py
 │   ├── telegram_handler.py       # messages, confirmation and access control
+│   ├── conversation.py           # shared message, confirmation and cancellation operations
 │   ├── auth.py
 │   ├── dedup.py                  # duplicate webhook delivery detection
 │   ├── timezones.py
@@ -62,7 +65,7 @@ ExpensesCalculatorAgenticBot/
     └── unit/                     # tools, storage, graph, handlers and scripts
 ```
 
-Integration tests and full-conversation model evaluation are roadmap items.
+A dedicated DynamoDB Local integration suite and additional model scenarios are roadmap items.
 
 ## Architecture Diagrams
 
@@ -649,22 +652,48 @@ required because the local `.env` need not name the model production runs.
 
 Inspect failures involving weekday dates and destination-based trip creation before
 changing the prompt or model. Keep benchmark outputs separate from the architecture
-document. This script checks only the first model response; full-conversation evaluation
-is planned in Phase 6.
+document. This script checks only the first model response; use the full-conversation
+evaluator below to exercise actual tool execution and stored outcomes.
 
-#### Layer 3 — LLM Evaluations (planned)
+#### Layer 3 — Full-conversation model evaluation (`scripts/evaluate_model.py`)
 
-Full-conversation evaluation is planned around the shared conversation operations in
-Phase 6. It will use fixed scenarios, isolated test data and repeated runs to assess:
+Telegram, `dev_runner.py` and the evaluator share message, confirmation and cancellation
+operations in `src/bot/conversation.py`. Trip-end verification uses a strongly consistent
+read of the active-trip marker. Model injection changes the model called by
+`agent_node`; the graph, tool routing, state schema and checkpoint keys stay the same.
 
-- Expense field extraction, currency interpretation and relative dates.
-- Tool selection, edits, deletion and recovery from tool errors.
-- Trip confirmation/cancellation and checkpoint resume.
-- Summary accuracy against totals computed from the exported records.
-- Calls per task, response latency, tokens and estimated cost.
+The evaluator runs fictional conversations from `scripts/evaluation_scenarios.json`,
+with fixed message timestamps and FX rates. Each turn checks the complete expected
+expense set, active-trip state, pending confirmation and any configured reply/tool
+requirements. Scenarios cover multiple expenses, targeted edits, confirmation,
+cancellation, time-zone changes, relative dates and destination clarification.
 
-LangSmith is a possible tracing and experiment-tracking integration. The
-`tests/evals/` directory, datasets and evaluators are not yet implemented.
+Print a plan without database or model requests:
+
+```bash
+uv run python -m scripts.evaluate_model
+uv run python -m scripts.evaluate_model --only confirm_trip_end cancel_trip_end
+```
+
+Paid runs require `--allow-paid`, a model and region, token prices via `--input-price`
+and `--output-price` (USD per million tokens), and positive `--max-requests` and
+`--max-cost-usd` limits. `--temperature`, `--request-fields`, `--runs` and
+`--max-output-tokens` configure inference; temperature is omitted by default.
+Storage must be a loopback HTTP endpoint. Each run creates a uniquely named local
+table, preserving existing local data, and removes that table afterwards. Automatic
+Bedrock retries are disabled so the request limit counts every attempted call.
+
+Reports include transcripts, per-turn checks, per-request latency, reported token usage
+and estimated cost, and are saved after each attempted turn. `--output` selects a JSON
+report path; the default is outside the repository in the system temporary directory.
+The cost limit uses an input estimate and maximum output allowance before each call;
+it is an estimated-cost guard, not an AWS billing cap. Failed requests retain a
+conservative cost reservation when usage is unavailable.
+
+Mocked-model tests use the real graph, tools and DynamoDB checkpointer with moto.
+Broader deletion/error-recovery scenarios, numerical summary checks and a LangSmith
+integration remain future work. The evaluator does not test Telegram delivery or chart
+attachments.
 
 ### Coverage
 
@@ -797,15 +826,13 @@ History sent to the model is bounded, and the conversation is checkpointed once 
 turn ([0013](docs/decisions/0013-bounded-history-and-once-per-turn-checkpoints.md)).
 Validate token use and checkpoint overhead under representative workloads.
 
-- [ ] **Share conversation operations across production, the dev runner and evaluation.**
-  Extract message, confirmation and cancellation handling while preserving production
-  checks and checkpoint behavior. Support caller-supplied timestamps, models and isolated
-  storage. Verify with regression tests before paid evaluation.
-- [ ] **Add a reusable model evaluation script.** Drive complete scripted conversations
-  through the shared operations with selectable models, Bedrock regions and request
-  settings. Use isolated data and fixed timestamps/FX rates, check final outcomes, and
-  record transcripts, correctness, latency, token usage and estimated cost. Require
-  explicit approval for paid runs and enforce request and estimated-cost limits.
+- [x] **Share conversation operations across production, the dev runner and evaluation.**
+  Message, confirmation and cancellation handling is shared, including verification
+  that a confirmed trip actually ended. Graph state and checkpoint keys are preserved.
+- [x] **Add a reusable model evaluation script.** Complete conversations use selectable
+  models, regions and request settings, isolated local storage, fixed timestamps/FX,
+  outcome checks and JSON reports. Paid runs require explicit opt-in and request and
+  estimated-cost limits.
 - [ ] **Evaluate GLM 4.7 Flash as an alternative chat model.** Use the shared evaluator
   to compare correctness, latency and cost against the current model across complete
   conversations. Verify regional availability and remaining model support before any

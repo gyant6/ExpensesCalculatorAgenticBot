@@ -1,0 +1,99 @@
+{
+  "fx_rates": {"SGD": 1, "JPY": 100, "KRW": 1000, "USD": 0.75},
+  "scenarios": [
+    {
+      "name": "multiple_expenses",
+      "steps": [
+        {"text": "Start a trip to Tokyo", "message_time": "2026-10-09T03:00:00Z", "expected": {"trip_active": true, "timezone": "Asia/Tokyo", "required_tools": ["start_trip"]}},
+        {"text": "Lunch 1200 yen cash and train 300 yen by card", "message_time": "2026-10-09T03:01:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+          {"summary": "Train", "amount": "300", "currency": "JPY", "category": "Transport", "date": "2026-10-09"}
+        ], "required_tools": ["add_expense"]}},
+        {"text": "Show all", "message_time": "2026-10-09T03:02:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"},
+          {"summary": "Train", "amount": "300", "currency": "JPY", "category": "Transport", "date": "2026-10-09"}
+        ], "required_tools": ["get_all_expenses"], "forbidden_tools": ["add_expense", "edit_expense", "delete_expense", "end_trip"]}}
+      ]
+    },
+    {
+      "name": "targeted_category_edit",
+      "steps": [
+        {"text": "Start a trip to Tokyo", "message_time": "2026-10-09T03:00:00Z", "expected": {"trip_active": true, "timezone": "Asia/Tokyo"}},
+        {"text": "Notebook 500 yen, pen 200 yen and train 300 yen, all by card", "message_time": "2026-10-09T03:01:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Notebook", "amount": "500", "currency": "JPY", "category": "Shopping", "date": "2026-10-09"},
+          {"summary": "Pen", "amount": "200", "currency": "JPY", "category": "Shopping", "date": "2026-10-09"},
+          {"summary": "Train", "amount": "300", "currency": "JPY", "category": "Transport", "date": "2026-10-09"}
+        ]}},
+        {"text": "Change notebook and pen to Misc category", "message_time": "2026-10-09T03:02:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Notebook", "amount": "500", "currency": "JPY", "category": "Misc", "date": "2026-10-09"},
+          {"summary": "Pen", "amount": "200", "currency": "JPY", "category": "Misc", "date": "2026-10-09"},
+          {"summary": "Train", "amount": "300", "currency": "JPY", "category": "Transport", "date": "2026-10-09"}
+        ], "required_tools": ["edit_expense"], "forbidden_tools": ["add_expense", "delete_expense", "end_trip"]}}
+      ]
+    },
+    {
+      "name": "cancel_trip_end",
+      "steps": [
+        {"text": "Start a trip to Tokyo", "message_time": "2026-10-09T03:00:00Z", "expected": {"trip_active": true, "timezone": "Asia/Tokyo"}},
+        {"text": "Lunch 1200 yen cash", "message_time": "2026-10-09T03:01:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+        ]}},
+        {"text": "End my trip", "message_time": "2026-10-09T03:02:00Z", "expected": {"trip_active": true, "awaiting_confirmation": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+        ], "required_tools": ["end_trip"], "archived_expenses": 0}},
+        {"text": "Coffee 400 yen", "message_time": "2026-10-09T03:03:00Z", "expected": {"trip_active": true, "awaiting_confirmation": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+        ], "forbidden_tools": ["add_expense"], "archived_expenses": 0}},
+        {"action": "cancel", "message_time": "2026-10-09T03:04:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+        ], "archived_expenses": 0, "forbidden_tools": ["end_trip"]}}
+      ]
+    },
+    {
+      "name": "confirm_trip_end",
+      "steps": [
+        {"text": "Start a trip to Tokyo", "message_time": "2026-10-09T03:00:00Z", "expected": {"trip_active": true, "timezone": "Asia/Tokyo"}},
+        {"text": "Lunch 1200 yen cash", "message_time": "2026-10-09T03:01:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+        ]}},
+        {"text": "End my trip", "message_time": "2026-10-09T03:02:00Z", "expected": {"trip_active": true, "awaiting_confirmation": true, "expenses": [
+          {"summary": "Lunch", "amount": "1200", "currency": "JPY", "category": "Food", "date": "2026-10-09", "payment_method": "Cash"}
+        ], "required_tools": ["end_trip"], "archived_expenses": 0}},
+        {"action": "confirm", "message_time": "2026-10-09T03:03:00Z", "expected": {"trip_active": false, "archived_expenses": 1}}
+      ]
+    },
+    {
+      "name": "timezone_midnight",
+      "steps": [
+        {"text": "Start a trip in New York", "message_time": "2026-10-09T02:00:00Z", "expected": {"trip_active": true, "timezone": "America/New_York"}},
+        {"text": "Dinner 20 USD", "message_time": "2026-10-09T02:01:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Dinner", "amount": "20", "currency": "USD", "category": "Food", "date": "2026-10-08"}
+        ]}},
+        {"text": "I am now in Tokyo", "message_time": "2026-10-09T02:02:00Z", "expected": {"trip_active": true, "timezone": "Asia/Tokyo", "expenses": [
+          {"summary": "Dinner", "amount": "20", "currency": "USD", "category": "Food", "date": "2026-10-08"}
+        ], "required_tools": ["set_trip_timezone"]}},
+        {"text": "Coffee 400 yen", "message_time": "2026-10-09T02:03:00Z", "expected": {"trip_active": true, "timezone": "Asia/Tokyo", "expenses": [
+          {"summary": "Dinner", "amount": "20", "currency": "USD", "category": "Food", "date": "2026-10-08"},
+          {"summary": "Coffee", "amount": "400", "currency": "JPY", "category": "Food", "date": "2026-10-09"}
+        ]}}
+      ]
+    },
+    {
+      "name": "relative_dates",
+      "steps": [
+        {"text": "Start a trip to Seoul", "message_time": "2026-10-05T03:00:00Z", "expected": {"trip_active": true, "timezone": "Asia/Seoul"}},
+        {"text": "Dinner on Tuesday 12000 won and lunch yesterday 8000 won, both cash", "message_time": "2026-10-09T03:01:00Z", "expected": {"trip_active": true, "expenses": [
+          {"summary": "Dinner", "amount": "12000", "currency": "KRW", "category": "Food", "date": "2026-10-06", "payment_method": "Cash"},
+          {"summary": "Lunch", "amount": "8000", "currency": "KRW", "category": "Food", "date": "2026-10-08", "payment_method": "Cash"}
+        ]}}
+      ]
+    },
+    {
+      "name": "destination_clarification",
+      "steps": [
+        {"text": "Start trip", "message_time": "2026-10-09T03:00:00Z", "expected": {"trip_active": false, "forbidden_tools": ["start_trip", "add_expense"]}},
+        {"text": "Taipei", "message_time": "2026-10-09T03:01:00Z", "expected": {"trip_active": true, "timezone": "Asia/Taipei", "required_tools": ["start_trip"]}}
+      ]
+    }
+  ]
+}

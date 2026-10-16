@@ -106,6 +106,7 @@ async def test_an_ended_trip_sends_the_summary_and_files_then_clears(
     last_edit = harness["query"].edit_message_text.await_args
     assert last_edit.args[0] == "Trip summary: SGD 20.00"
     assert harness["message"].reply_photo.await_count == 2
+    assert harness["trip_item"].call_args.kwargs == {"consistent_read": True}
     harness["message"].reply_document.assert_awaited_once()
     harness["clear"].assert_called_once_with(
         harness["graph"], thread_id_for(str(LEDGER))

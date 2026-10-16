@@ -129,12 +129,15 @@ def put_item_if_absent(item: dict[str, Any]) -> bool:
     return True
 
 
-def get_item(pk: str, sk: str) -> dict[str, Any] | None:
+def get_item(
+    pk: str, sk: str, *, consistent_read: bool = False
+) -> dict[str, Any] | None:
     """Fetch a single item from DynamoDB by its primary key.
 
     Args:
         pk: Partition key value (e.g. 'USER#123456789').
         sk: Sort key value (e.g. 'EXPENSE#2026-06-04T14:32:05.123456+00:00').
+        consistent_read: Read the latest committed value when verifying a write.
 
     Returns:
         The item as a plain dict, or None if no item exists at that key.
@@ -143,7 +146,9 @@ def get_item(pk: str, sk: str) -> dict[str, Any] | None:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     response = get_client().get_item(
-        TableName=settings.DYNAMODB_TABLE_NAME, Key={"PK": {"S": pk}, "SK": {"S": sk}}
+        TableName=settings.DYNAMODB_TABLE_NAME,
+        Key={"PK": {"S": pk}, "SK": {"S": sk}},
+        ConsistentRead=consistent_read,
     )
 
     low_level_data = response.get("Item")

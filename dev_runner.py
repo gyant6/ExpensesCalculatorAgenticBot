@@ -12,14 +12,18 @@ Usage:
 import argparse
 from datetime import datetime, timezone
 
-from langchain_core.messages import HumanMessage, ToolMessage
-
 from src.bot.agent.graph import (
-    CHECKPOINT_DURABILITY,
-    END_TRIP_NODE,
     build_graph,
     clear_thread_history,
     thread_id_for,
+)
+from src.bot.conversation import (
+    awaiting_confirmation,
+    cancel_end_trip,
+    config_for,
+    confirm_end_trip,
+    extract_text,
+    send_message,
 )
 
 
@@ -36,7 +40,7 @@ def run(user_id: str) -> None:
     """
     graph = build_graph()
     thread_id = thread_id_for(user_id)
-    config = {"configurable": {"thread_id": thread_id}}
+    config = config_for(user_id)
 
     print(f"Dev runner — user_id={user_id}. Type 'exit' to quit.\n")
 
@@ -55,48 +59,31 @@ def run(user_id: str) -> None:
         state = graph.get_state(config)
         trip_ended = False
 
-        if END_TRIP_NODE in (state.next or ()):
+        if awaiting_confirmation(state):
             # Graph is paused before end_trip_node — treat this turn as the confirmation.
             if user_input.lower() in ("y", "yes"):
-                result = graph.invoke(None, config, durability=CHECKPOINT_DURABILITY)
-                trip_ended = True
+                confirmation = confirm_end_trip(graph, user_id, state=state)
+                result = confirmation.result
+                if not confirmation.trip_ended:
+                    print("Bot: Could not end the trip. Please try again.\n")
+                    clear_thread_history(graph, thread_id)
+                    continue
+                trip_ended = confirmation.trip_ended
             else:
-                last_ai = state.values["messages"][-1]
-                tool_call_id = last_ai.tool_calls[0]["id"]
-                graph.update_state(
-                    config,
-                    {
-                        "messages": [
-                            ToolMessage(
-                                content="User cancelled ending the trip.",
-                                tool_call_id=tool_call_id,
-                            )
-                        ]
-                    },
-                    as_node="end_trip_node",
-                )
-                result = graph.invoke(None, config, durability=CHECKPOINT_DURABILITY)
+                result = cancel_end_trip(graph, user_id, state=state)
         else:
             # UTC, as Telegram sends it; the graph converts to the trip's local day.
             message_time = datetime.now(timezone.utc).isoformat()
-            result = graph.invoke(
-                {
-                    "messages": [HumanMessage(content=user_input)],
-                    "ledger_id": user_id,
-                    "message_time": message_time,
-                },
-                config,
-                durability=CHECKPOINT_DURABILITY,
-            )
+            result = send_message(graph, user_id, user_input, message_time, state=state)
 
         state_after = graph.get_state(config)
-        if state_after.next:
+        if awaiting_confirmation(state_after):
             print(
                 "Bot: [About to end your trip — type 'yes' to confirm or anything else to cancel]\n"
             )
         else:
             last_msg = result["messages"][-1]
-            print(f"Bot: {last_msg.content}\n")
+            print(f"Bot: {extract_text(last_msg.content) or 'Done.'}\n")
 
         if trip_ended:
             # After the summary has been printed — it was written from this history.

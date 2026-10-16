@@ -262,15 +262,22 @@ def build_model(
     model_id: str,
     temperature: float | None,
     request_fields: dict[str, Any] | None,
+    *,
+    region: str | None = None,
+    max_tokens: int | None = None,
+    client_config: Config | None = None,
 ) -> ChatModel:
     """The chat model with the bot's tools bound, as agent_node calls it."""
     llm = ChatBedrockConverse(
         client=session.client(
-            "bedrock-runtime", region_name=settings.AWS_REGION, config=_CLIENT_CONFIG
+            "bedrock-runtime",
+            region_name=region or settings.AWS_REGION,
+            config=client_config or _CLIENT_CONFIG,
         ),
         model_id=model_id,
         temperature=temperature,
         additional_model_request_fields=request_fields,
+        max_tokens=max_tokens,
     )
     return llm.bind_tools(BOT_TOOLS)
 
