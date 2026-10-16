@@ -68,54 +68,53 @@ Integration tests and full-conversation model evaluation are roadmap items.
 
 ### Local Development
 
-```
-User (Telegram app)
-        │
-        ▼
-  Telegram Servers
-        │  (polling — bot pulls updates every second)
-        ▼
-  python-telegram-bot (polling)
-        │
-        ▼
-  telegram_handler.py
-        │  (thread_id_for(ledger_id) as thread_id)
-        ▼
-  LangGraph Agent (graph.py)
-        │
-        ├──► DynamoDB Local (localhost:8000, Docker)
-        │         ├── Conversation checkpoints
-        │         └── Trip + Expense items
-        │
-        ├──► AWS Bedrock
-        │         └── Claude Haiku (via local AWS credentials)
-        │
-        └──► api.fxratesapi.com (HTTPS)
+```mermaid
+flowchart TB
+    user["User · Telegram app"] <--> telegram["Telegram servers"]
+
+    subgraph local["Local machine"]
+        polling["python-telegram-bot<br/>Polling entry point"]
+        handler["telegram_handler.py"]
+        agentGraph["LangGraph agent<br/>graph.py"]
+        db[("DynamoDB Local · Docker<br/>localhost:8000<br/>Checkpoints, trips, expenses and access control")]
+        charts["Chart rendering<br/>In-process"]
+
+        polling --> handler
+        handler -->|"thread_id_for(ledger_id)"| agentGraph
+        handler -->|"Access control and expense reads"| db
+        agentGraph -->|"Checkpoints and tools"| db
+        handler -->|"Trip-end attachments"| charts
+    end
+
+    telegram <-->|"Long polling (getUpdates)"| polling
+    agentGraph -->|"Local AWS credentials"| bedrock["AWS Bedrock<br/>LLM inference"]
+    agentGraph -->|"Trip-end tool"| fx["api.fxratesapi.com<br/>HTTPS"]
+    handler -->|"Trip-end attachments"| fx
 ```
 
 ### AWS Production (Phase 2)
 
-```
-User (Telegram app)
-        │
-        ▼
-  Telegram Servers
-        │  (webhook POST)
-        ▼
-  API Gateway (POST /webhook)
-        │
-        ▼
-  Lambda Function (main)
-        │
-        ├──► DynamoDB (real, same table schema)
-        │         ├── Conversation checkpoints (langgraph-checkpoint-aws)
-        │         └── Trip + Expense items
-        ├──► Bedrock (Claude Haiku, same region)
-        ├──► api.fxratesapi.com
-        │
-        └──► Lambda Function (charts)      [trip end only, synchronous invoke]
-                  expenses + FX rates in, two PNGs out.
-                  Reads no database and holds no state.
+```mermaid
+flowchart TB
+    user["User · Telegram app"] <--> telegram["Telegram servers"]
+
+    subgraph aws["AWS"]
+        gateway["API Gateway · HTTP API<br/>POST /webhook"]
+        main["Main Lambda<br/>Webhook verification, deduplication,<br/>Telegram handlers and LangGraph"]
+        db[("DynamoDB<br/>Checkpoints, trips, expenses,<br/>archives, access control and update claims")]
+        bedrock["Bedrock<br/>LLM inference"]
+        charts["Chart Lambda<br/>Stateless · no database access"]
+
+        gateway --> main
+        main --> db
+        main --> bedrock
+        main -->|"Trip end: synchronous invoke<br/>Expenses and FX rates"| charts
+        charts -->|"Two PNGs"| main
+    end
+
+    telegram -->|"Webhook POST"| gateway
+    main -->|"Replies and attachments via Telegram API"| telegram
+    main -->|"HTTPS"| fx["api.fxratesapi.com"]
 ```
 
 The chart function exists so matplotlib and numpy stay out of the main function, which
@@ -193,37 +192,24 @@ Approving a group ID grants access to all members messaging the bot within that 
 
 ### Graph Structure
 
+```mermaid
+flowchart TD
+    start(["START"]) --> check["check_trip_status<br/>Read active-trip marker; set trip start,<br/>time zone and local date"]
+    check --> agent["agent_node<br/>Call Bedrock with bound tools"]
+    agent --> route{"custom_routes(state)"}
+
+    route -->|"Not an AIMessage, or no tool calls"| finish(["END"])
+    route -->|"Only non-end_trip tools"| tools["tools_node<br/>Start trip, set time zone,<br/>add, edit, delete or list expenses"]
+    tools --> check
+
+    route -->|"end_trip is the only call"| endTrip["end_trip_node<br/>Pause and checkpoint before execution;<br/>execute only after confirmation"]
+    endTrip -->|"After execution"| agent
+
+    route -->|"end_trip batched with other calls"| batch["end_trip_batch_error_node<br/>Reject every call in the batch"]
+    batch --> agent
 ```
-START
-  │
-  ▼
-[check_trip_status] ◄──────────────────────────────────────────┐
-  │  (reads TRIP#ACTIVE; sets trip_start_date, trip_timezone    │
-  │   and local_date — message_time as a day in the trip zone)  │
-  ▼                                                            │
-[agent_node] ◄─────────────────────────────────────────┐       │
-  │                                                    │       │
-  │  custom_routes(state) inspects the last message:   │       │
-  │                                                    │       │
-  ├── not an AIMessage, or no tool_calls ──► END        │       │
-  │                                                    │       │
-  ├── end_trip is the only tool call                   │       │
-  │        └──► [end_trip_node] ───────────────────────┤       │
-  │               interrupt_before: graph pauses here   │       │
-  │               before the tool executes, persists    │       │
-  │               state, and returns to the handler     │       │
-  │                                                    │       │
-  ├── end_trip batched with other tools                │       │
-  │        └──► [end_trip_batch_error_node] ───────────┘       │
-  │               injects a rejecting ToolMessage for          │
-  │               every call in the batch, so the model        │
-  │               retries with end_trip alone                  │
-  │                                                            │
-  └── only non-end_trip tools                                  │
-           └──► [tools_node] ──────────────────────────────────┘
-                  start_trip, set_trip_timezone, add_expense,
-                  edit_expense, delete_expense, get_all_expenses
-```
+
+The diamond represents conditional routing, not an additional graph node.
 
 The batch case exists because routing a mixed batch either way loses a call silently:
 `tools_node` has no `end_trip` bound, and `end_trip_node` has none of the others. Worse,
@@ -236,6 +222,79 @@ This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` cal
 `end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
 
 Confirmation arrives as a callback query rather than as a new text message. `handle_callback` first renders the chart and CSV attachments from the still-live expense data, then resumes with `graph.invoke(None, config)` so `end_trip_node` genuinely executes: the tool performs the export and the deletion and returns the CSV that `agent_node` turns into a summary. Once that summary and the attachments have been delivered, the handler calls `clear_thread_history` to delete the thread's checkpoints. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
+
+### End-of-Trip Sequence
+
+The sequence starts with the model requesting `end_trip` alone. Earlier tool calls,
+including listing expenses, are omitted. The chart participant is a separate Lambda
+in production and an in-process renderer locally.
+
+```mermaid
+sequenceDiagram
+    actor User as User via Telegram
+    participant Handler as Telegram handlers
+    participant Graph as LangGraph
+    participant DB as DynamoDB
+    participant FX as FX API
+    participant Charts as Chart renderer
+
+    User->>Handler: Ask to end the trip
+    Handler->>Graph: Invoke with the user message
+    Note over Graph: agent_node requests end_trip alone
+    Graph->>DB: Save checkpoint before end_trip_node
+    Graph-->>Handler: Return with graph paused
+    Handler-->>User: Show Yes / No confirmation
+    User->>Handler: Tap Yes or No
+    Handler->>Handler: Claim confirmation by removing keyboard
+    Handler->>Graph: Verify end_trip_node is still pending
+
+    alt Cancel
+        Handler->>Graph: Inject cancellation result as end_trip_node and resume
+        Note over Graph: agent_node replies without executing end_trip
+        Graph-->>Handler: Cancellation reply
+        Handler-->>User: Send reply and retain trip and history
+    else Confirm
+        Handler-->>User: Show ending-trip notice
+        Handler->>DB: Read live expenses
+        DB-->>Handler: Expenses
+        opt Trip has expenses
+            Handler->>FX: Fetch rates for attachments
+            FX-->>Handler: Rates, or unavailable
+            Handler->>Handler: Build CSV attachment
+            opt FX rates available
+                Handler->>Charts: Render charts from expenses and rates
+                Charts-->>Handler: PNGs, or no charts on failure
+            end
+        end
+        Handler->>Graph: Resume with graph.invoke(None, config)
+        Graph->>DB: end_trip reads active trip and expenses
+        opt Trip has expenses
+            Graph->>FX: Fetch rates for tool-result CSV
+            FX-->>Graph: Rates, or unavailable
+        end
+        Graph->>Graph: Build tool-result CSV
+        opt Trip has expenses
+            Graph->>DB: Archive expenses before deletion
+        end
+        Graph->>DB: Delete live expenses and active-trip marker
+        Graph->>Graph: agent_node writes summary via Bedrock
+        Graph->>DB: Save completed-turn checkpoint
+        Graph-->>Handler: Return summary
+        Handler->>DB: Check whether active-trip marker remains
+        DB-->>Handler: Trip status
+        alt Trip is still active
+            Handler-->>User: Report failure and withhold summary and files
+            Handler->>DB: Clear checkpoints so a new request can retry
+        else Trip has ended
+            Handler-->>User: Send summary and available attachments
+            Handler->>DB: Clear conversation checkpoints after delivery
+        end
+    end
+```
+
+Duplicate or stale confirmations return before either branch. Attachment-generation
+failures can omit individual files; unexpected graph errors follow the normal handler
+error path. The two FX fetches are independent and can return different rates.
 
 ### State Definition
 
