@@ -55,9 +55,10 @@ end the current trip before starting a new one.
 
     prompt += """
 - When a user requests you to start a new trip, call start_trip with the IANA time zone of
-  where they are travelling (e.g. 'Asia/Tokyo' for Japan). If they have not said where they
-  are going, ask once before starting. This is the only question you should ask about
-  dates or places.
+  where they are travelling. A named city is enough: infer its IANA time zone and start
+  immediately, without asking for its country or time zone. Ask for a destination only
+  when none was supplied, or the place could mean different time zones. Once the user
+  supplies that destination, start the trip without asking again.
 - When the user says they are now somewhere with a different time zone (e.g. "I'm in Seoul
   now"), call set_trip_timezone.
 - When a user sends you an expense, you should record the expense using the tool add_expense.
