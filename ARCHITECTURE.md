@@ -206,13 +206,15 @@ flowchart TD
     tools --> check
 
     route -->|"end_trip is the only call"| endTrip["end_trip_node<br/>Pause and checkpoint before execution;<br/>execute only after confirmation"]
-    endTrip -->|"After execution"| agent
+    endTrip --> endRoute{"route_after_end_trip(state)"}
+    endRoute -->|"Cancelled"| agent
+    endRoute -->|"Tool result"| finish
 
     route -->|"end_trip batched with other calls"| batch["end_trip_batch_error_node<br/>Reject every call in the batch"]
     batch --> agent
 ```
 
-The diamond represents conditional routing, not an additional graph node.
+The diamonds represent conditional routing, not additional graph nodes.
 
 The batch case exists because routing a mixed batch either way loses a call silently:
 `tools_node` has no `end_trip` bound, and `end_trip_node` has none of the others. Worse,
@@ -220,11 +222,11 @@ The batch case exists because routing a mixed batch either way loses a call sile
 entirely. Rejecting the whole batch is the only option that neither drops a tool call nor
 deletes a trip without asking.
 
-This is a ReAct loop implemented as a LangGraph graph. `agent_node` calls the configured Bedrock model with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. `tools_node` edges back through `check_trip_status`, so a trip started or moved to another time zone earlier in the turn — "start trip in Seoul, coffee 5" — is re-read, with its local date, before the model records the coffee. A confirmed `end_trip` runs the code-only summary node and ends the graph; a cancellation returns to `agent_node` for a reply.
+This is a ReAct loop implemented as a LangGraph graph. `agent_node` calls the configured Bedrock model with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. `tools_node` edges back through `check_trip_status`, so a trip started or moved to another time zone earlier in the turn — "start trip in Seoul, coffee 5" — is re-read, with its local date, before the model records the coffee. After `end_trip` runs, the graph ends with its tool result; a cancellation returns to `agent_node` for a reply.
 
 `end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
 
-Confirmation arrives as a callback query rather than as a new text message. `handle_callback` first renders charts and a fallback CSV from the still-live expense data, then resumes with `graph.invoke(None, config)` so `end_trip_node` genuinely executes. The tool performs the export and deletion; the next graph node calculates the summary from that tool-result CSV without another inference request. The handler uses the same CSV for the delivered totals and attachment. Once the text and attachments have been delivered, it calls `clear_thread_history` to delete the thread's checkpoints. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
+Confirmation arrives as a callback query rather than as a new text message. `handle_callback` first renders charts and a fallback CSV from the still-live expense data, then resumes with `graph.invoke(None, config)` so `end_trip_node` genuinely executes. The tool performs the export and deletion; the handler calculates the summary from that tool-result CSV without another inference request. The handler uses the same CSV for the delivered totals and attachment. Once the text and attachments have been delivered, it calls `clear_thread_history` to delete the thread's checkpoints. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
 
 ### End-of-Trip Sequence
 
@@ -280,9 +282,8 @@ sequenceDiagram
             Graph->>DB: Archive expenses before deletion
         end
         Graph->>DB: Delete live expenses and active-trip marker
-        Graph->>Graph: Code-only summary node calculates totals from CSV
         Graph->>DB: Save completed-turn checkpoint
-        Graph-->>Handler: Return tool-result CSV and calculated summary
+        Graph-->>Handler: Return end_trip tool result
         Handler->>DB: Check whether active-trip marker remains
         DB-->>Handler: Trip status
         alt Trip is still active
@@ -459,7 +460,7 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
   4. Builds the CSV via `generate_csv(expenses, fx_rates)` — before any deletion, so a failed export leaves the trip intact rather than destroying records with no copy of them.
   5. Writes the `ARCHIVE#<ended_at>` item holding every expense, with a `ttl` 90 days out. Skipped for a trip with no expenses. If this write fails, the tool fails and nothing is deleted.
   6. Deletes every `EXPENSE#*` item and the `TRIP#ACTIVE` item.
-- **Returns (to graph):** A confirmation line followed by the CSV of all expenses, including the `amount_sgd` column. The code-only summary node uses this CSV for the delivered totals. If rates were unavailable, foreign-currency rows have a blank `amount_sgd` cell.
+- **Returns (to graph):** A confirmation line followed by the CSV of all expenses, including the `amount_sgd` column. The caller uses this CSV for the delivered totals. If rates were unavailable, foreign-currency rows have a blank `amount_sgd` cell.
 - **On confirm (`handle_callback`):**
   1. Renders charts and a fallback CSV from the live expense data before the tool deletes it.
   2. Resumes the graph with `graph.invoke(None, config)`, which runs the node described above.
@@ -861,7 +862,7 @@ Validate token use and checkpoint overhead under representative workloads.
   breakdown from the rounded values in the attached CSV, with original-currency totals
   when conversion is incomplete. Share this behavior across Telegram, the dev runner
   and model evaluation.
-- [ ] **Add optional end-of-trip analysis.** Use the dedicated summary node to pass
+- [ ] **Add optional end-of-trip analysis.** Use a separate analysis step to pass
   computed figures to a stronger model for spending patterns and outliers while
   keeping routine chat on a lower-cost model. Validate summary accuracy and configure
   model access and deployment permissions before enabling it.
