@@ -8,6 +8,7 @@ would otherwise fail every model alike and look like a model problem.
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -275,6 +276,45 @@ def test_only_runs_the_named_scenarios(tmp_path: Any) -> None:
     assert '"scenario": "greeting"' in out.read_text(encoding="utf-8")
 
 
+def test_spending_limit_stops_before_an_unaffordable_request(tmp_path: Any) -> None:
+    model = _model_returning(AIMessage("Woof!"))
+    out = tmp_path / "limited.json"
+    with (
+        patch.object(compare_models, "build_model", return_value=model) as build,
+        patch.object(compare_models, "resolve_profile", return_value=None),
+        patch("boto3.Session"),
+    ):
+        code = compare_models.main(
+            [
+                "--model",
+                "m",
+                "--region",
+                "ap-southeast-2",
+                "--only",
+                "greeting",
+                "--max-output-tokens",
+                "1024",
+                "--max-cost-usd",
+                "0.000001",
+                "--input-price",
+                "0.31",
+                "--output-price",
+                "1.24",
+                "--json",
+                str(out),
+            ]
+        )
+
+    assert code == 1
+    model.invoke.assert_not_called()
+    assert build.call_args.kwargs["region"] == "ap-southeast-2"
+    assert build.call_args.kwargs["max_tokens"] == 1024
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["attempted_requests"] == 0
+    assert report["request_records"] == []
+    assert report["results"] == []
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -282,6 +322,8 @@ def test_only_runs_the_named_scenarios(tmp_path: Any) -> None:
         ["--model", "m", "--request-fields", "[1]"],
         ["--model", "m", "--request-fields", "{not json"],
         ["--model", "m", "--temperature", "0.5", "--no-temperature"],
+        ["--model", "m", "--max-cost-usd", "1"],
+        ["--model", "m", "--max-output-tokens", "0"],
         [],
     ],
 )

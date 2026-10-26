@@ -44,13 +44,13 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from langchain_aws import ChatBedrockConverse
-from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.messages.tool import ToolCall
-from langchain_core.runnables import Runnable
 
 from scripts.deploy_lambda import resolve_profile
+from scripts.evaluate_model import BudgetExceeded, MeteredModel
 from scripts.model_scenarios import SCENARIOS, Accepted, ExpectedCall, Scenario
+from src.bot.agent.nodes import ChatModel
 from src.bot.agent.nodes import tools as BOT_TOOLS
 from src.bot.agent.prompts import get_system_prompt
 from src.bot.config import settings
@@ -69,8 +69,6 @@ _REASONING_BLOCK_TYPES: Final = frozenset(
 )
 
 _REPLY_PREVIEW_CHARS: Final = 60
-
-ChatModel = Runnable[LanguageModelInput, BaseMessage]
 
 
 @dataclass(frozen=True)
@@ -293,6 +291,17 @@ def _parse_request_fields(raw: str) -> dict[str, Any]:
     return fields
 
 
+def _positive_decimal(raw: str) -> Decimal:
+    """Parse a finite positive USD amount or token price."""
+    try:
+        value = Decimal(raw)
+    except InvalidOperation as error:
+        raise argparse.ArgumentTypeError("must be a finite positive number") from error
+    if not value.is_finite() or value <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments, run the selected scenarios and print the report.
 
@@ -337,6 +346,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--profile", help="AWS profile (default: resolved as for deploys)"
     )
+    parser.add_argument("--region", help="AWS Region (default: configured region)")
+    parser.add_argument("--max-output-tokens", type=int)
+    parser.add_argument("--max-cost-usd", type=_positive_decimal)
+    parser.add_argument("--input-price", type=_positive_decimal)
+    parser.add_argument("--output-price", type=_positive_decimal)
     parser.add_argument(
         "--json", type=Path, help="also write every result to this file"
     )
@@ -346,15 +360,42 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if args.runs < 1:
         parser.error("--runs must be at least 1")
+    if args.max_output_tokens is not None and args.max_output_tokens < 1:
+        parser.error("--max-output-tokens must be positive")
+    budget_values = (args.max_cost_usd, args.input_price, args.output_price)
+    if any(value is not None for value in budget_values) and (
+        not all(value is not None for value in budget_values)
+        or args.max_output_tokens is None
+    ):
+        parser.error(
+            "A spending limit requires --max-cost-usd, --input-price, "
+            "--output-price and --max-output-tokens"
+        )
 
     temperature_sent = None if args.no_temperature else args.temperature
-    model = build_model(
+    selected = [s for s in SCENARIOS if not args.only or s.name in args.only]
+    raw_model = build_model(
         boto3.Session(profile_name=resolve_profile(args.profile)),
         args.model,
         temperature_sent,
         args.request_fields,
+        region=args.region,
+        max_tokens=args.max_output_tokens,
     )
-    selected = [s for s in SCENARIOS if not args.only or s.name in args.only]
+    metered = (
+        MeteredModel(
+            raw_model,
+            max_requests=len(selected) * args.runs,
+            max_cost=args.max_cost_usd,
+            input_price=args.input_price,
+            output_price=args.output_price,
+            max_output_tokens=args.max_output_tokens,
+            tool_tokens=len(json.dumps([tool.args for tool in BOT_TOOLS])),
+        )
+        if args.max_cost_usd is not None
+        else None
+    )
+    model = metered or raw_model
     print(
         f"model {args.model}, temperature {temperature_sent}, "
         f"request fields {json.dumps(args.request_fields)}, "
@@ -362,30 +403,52 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     results: list[CallResult] = []
+
+    def save_results(error: str | None = None) -> None:
+        """Persist completed calls and request records, including partial runs."""
+        if args.json:
+            args.json.write_text(
+                json.dumps(
+                    {
+                        "model": args.model,
+                        "region": args.region or settings.AWS_REGION,
+                        "temperature": temperature_sent,
+                        "request_fields": args.request_fields,
+                        "results": [asdict(r) for r in results],
+                        "estimated_cost_usd": str(metered.cost) if metered else None,
+                        "cost_estimate_note": (
+                            "Failed requests without usage are recorded at the reserved "
+                            "maximum; this is not a confirmed AWS charge."
+                            if metered
+                            else None
+                        ),
+                        "attempted_requests": len(metered.calls)
+                        if metered
+                        else len(results),
+                        "request_records": metered.calls if metered else None,
+                        "error": error,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
     try:
         for run in range(1, args.runs + 1):
             for scenario in selected:
                 results.append(run_scenario(model, scenario, run))
+                save_results()
+    except BudgetExceeded as error:
+        save_results(str(error))
+        print(f"Evaluation stopped: {error}", file=sys.stderr)
+        return 1
     except (ClientError, BotoCoreError) as error:
+        save_results(str(error))
         print(f"Bedrock rejected the request: {error}", file=sys.stderr)
         return 1
 
-    # Written before printing, so a run that has been paid for is never lost to a
-    # display problem.
     if args.json:
-        args.json.write_text(
-            json.dumps(
-                {
-                    "model": args.model,
-                    "temperature": temperature_sent,
-                    "request_fields": args.request_fields,
-                    "results": [asdict(r) for r in results],
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
         print(f"results written to {args.json}\n")
     print_report(results)
     return 0

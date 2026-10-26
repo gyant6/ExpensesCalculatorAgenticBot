@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from src.bot.storage import dynamodb
 from src.bot.tools import expenses
@@ -274,7 +275,8 @@ def test_edit_with_an_invalid_expected_amount_is_refused(
 ) -> None:
     original = _seed("k7qm")
 
-    assert "expected_amount" in _edit("k7qm", "about six", category="Shopping")
+    with pytest.raises(ValidationError, match="expected_amount"):
+        _edit("k7qm", "about six", category="Shopping")
     assert _get("k7qm") == original
 
 
@@ -335,6 +337,16 @@ def test_delete_is_refused_when_the_amount_does_not_match(
 
 def test_delete_of_an_unknown_id_is_refused(dynamodb_table: DynamoDBClient) -> None:
     assert "No expense has id 'zzzz'" in _delete("zzzz", "6.13")
+
+
+def test_delete_rejects_an_amount_with_currency(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    original = _seed("k7qm", amount=Decimal("5500"), currency="KRW")
+
+    with pytest.raises(ValidationError, match="expected_amount"):
+        _delete("k7qm", "5500 KRW")
+    assert _get("k7qm") == original
 
 
 # ── get_all_expenses ─────────────────────────────────────────────────────────

@@ -45,11 +45,11 @@ _INVALID_AMOUNT = "amount must be a valid positive number (e.g. '1200' or '12.50
 _INVALID_DATE = "datetime should be in YYYY-MM-DD format (e.g. 2020-12-30)"
 
 
-def check_valid_amount(amount: str) -> bool:
-    """Validate that an amount string represents a positive number.
+def check_valid_amount(amount: str | Decimal) -> bool:
+    """Validate that an amount represents a positive number.
 
     Args:
-        amount: The amount string to validate (e.g. '12.50').
+        amount: The decimal amount to validate (e.g. '12.50').
 
     Returns:
         True if the amount is a valid positive number, False otherwise.
@@ -104,7 +104,7 @@ def _expense_id(item: dict[str, Any]) -> str:
 
 
 def _load_for_change(
-    ledger_id: str, expense_id: str, expected_amount: str
+    ledger_id: str, expense_id: str, expected_amount: Decimal
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Fetch the expense an edit or delete targets, and check it is the one meant.
 
@@ -231,7 +231,7 @@ def add_expense(
 def edit_expense(
     ledger_id: Annotated[str, InjectedState("ledger_id")],
     expense_id: str,
-    expected_amount: str,
+    expected_amount: Decimal,
     edit_message: str,
     summary: str | None = None,
     category: str | None = None,
@@ -257,7 +257,8 @@ def edit_expense(
 
     Args:
         expense_id: The expense's id, as given by get_all_expenses or add_expense.
-        expected_amount: The expense's amount before this edit, e.g. '29.38'.
+        expected_amount: The expense's amount before this edit, e.g. 29.38,
+            without a currency code.
         edit_message: The user's message describing the edit. Appended to the original
             source_message.
         summary: New short description, only if the user asked to rename it.
@@ -322,7 +323,7 @@ def edit_expense(
 def delete_expense(
     ledger_id: Annotated[str, InjectedState("ledger_id")],
     expense_id: str,
-    expected_amount: str,
+    expected_amount: Decimal,
 ) -> str:
     """Delete an existing expense.
 
@@ -335,7 +336,8 @@ def delete_expense(
 
     Args:
         expense_id: The expense's id, as given by get_all_expenses or add_expense.
-        expected_amount: The expense's current amount, e.g. '29.38'.
+        expected_amount: The expense's current amount, e.g. 29.38,
+            without a currency code.
 
     Returns:
         A confirmation string on success, or an error string if the id is unknown or the

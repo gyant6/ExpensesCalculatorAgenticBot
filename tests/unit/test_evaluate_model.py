@@ -25,6 +25,23 @@ def _suite() -> evaluation.Suite:
     )
 
 
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        ("Total so far: ¥33,210 JPY", True),
+        ("Total so far: ¥31,210 JPY", False),
+        ("Total: 33,210 JPY", True),
+        ("The expenses are listed above.", True),
+    ],
+)
+def test_reported_total_matches_stored_expenses(reply: str, expected: bool) -> None:
+    expenses = [
+        {"amount": "11900", "currency": "JPY"},
+        {"amount": "21310", "currency": "JPY"},
+    ]
+    assert evaluation._reported_total_matches(reply, expenses) is expected
+
+
 def _lunch_replies() -> list[AIMessage]:
     return [
         tool_call("start_trip", timezone="Asia/Tokyo"),

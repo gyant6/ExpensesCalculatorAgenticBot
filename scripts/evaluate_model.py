@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import tempfile
 import time
@@ -225,6 +226,27 @@ def _expense_signature(item: dict[str, Any]) -> tuple[str, ...]:
     )
 
 
+_TOTAL_LINE = re.compile(
+    r"\bTotal(?: so far)?\s*:\s*[^\d\n]{0,24}(\d[\d,]*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_SHOW_ALL_EXPENSES = re.compile(r"\bshow\b.*\bexpenses\b", re.IGNORECASE)
+
+
+def _reported_total_matches(reply: str, expenses: list[dict[str, Any]]) -> bool:
+    """Check explicit full-list totals against stored amounts for one currency.
+
+    A reply without an explicit total, or a list with mixed currencies, has no
+    comparable value here. Other fixture checks still apply to those replies.
+    """
+    amounts = _TOTAL_LINE.findall(reply)
+    currencies = {item["currency"] for item in expenses}
+    if not amounts or len(currencies) != 1:
+        return True
+    stored_total = sum((Decimal(str(item["amount"])) for item in expenses), Decimal(0))
+    return all(Decimal(amount.replace(",", "")) == stored_total for amount in amounts)
+
+
 @contextmanager
 def _amount_conflict(
     ledger_id: str, conflict: AmountConflict | None
@@ -245,7 +267,7 @@ def _amount_conflict(
     original = expenses._load_for_change
 
     def load(
-        requested_ledger: str, expense_id: str, expected_amount: str
+        requested_ledger: str, expense_id: str, expected_amount: Decimal
     ) -> tuple[dict[str, Any] | None, str | None]:
         """Inject once after a valid lookup, emulating a stale read of the amount."""
         item, error = original(requested_ledger, expense_id, expected_amount)
@@ -419,6 +441,11 @@ def run_scenario(
                 "reply": all(
                     text.casefold() in entry["reply"].casefold()
                     for text in expected.reply_contains
+                ),
+                "reported_total": (
+                    not step.text
+                    or not _SHOW_ALL_EXPENSES.search(step.text)
+                    or _reported_total_matches(entry["reply"], stored)
                 ),
                 "required_tools": all(
                     tool in tools for tool in expected.required_tools

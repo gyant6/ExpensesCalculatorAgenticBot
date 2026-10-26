@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from mypy_boto3_dynamodb import DynamoDBClient
 
 import dev_runner
@@ -87,6 +87,44 @@ def test_message_uses_original_timestamp_and_persisted_history(
     restored = build_graph(model=ScriptedModel()).get_state(config_for("test-ledger"))
     assert restored.values["message_time"] == MESSAGE_TIME
     assert len(restored.values["messages"]) == 4
+
+
+def test_delete_validation_error_reaches_agent_for_retry(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    key = ("USER#test-ledger", "EXPENSE#k7qm")
+    dynamodb.put_item({"PK": key[0], "SK": "TRIP#ACTIVE", "start_date": "2026-10-09"})
+    original = {
+        "PK": key[0],
+        "SK": key[1],
+        "summary": "Coffee",
+        "amount": "5500",
+        "currency": "KRW",
+    }
+    dynamodb.put_item(original)
+
+    def retry_after_error(messages: list[BaseMessage]) -> AIMessage:
+        error = messages[-1]
+        assert isinstance(error, ToolMessage)
+        assert "expected_amount" in str(error.content)
+        assert dynamodb.get_item(*key) == original
+        return tool_call("delete_expense", expense_id="k7qm", expected_amount="5500")
+
+    model = ScriptedModel(
+        tool_call("delete_expense", expense_id="k7qm", expected_amount="5500 KRW"),
+        retry_after_error,
+        AIMessage("Deleted"),
+    )
+    result = send_message(
+        graph=build_graph(model=model),
+        ledger_id="test-ledger",
+        text="Delete the coffee",
+        message_time=MESSAGE_TIME,
+    )
+
+    assert result["messages"][-1].content == "Deleted"
+    assert dynamodb.get_item(*key) is None
+    assert not model.replies
 
 
 def test_confirmation_blocks_new_messages_and_cancellation_keeps_trip(
