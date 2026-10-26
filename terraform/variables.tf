@@ -33,6 +33,29 @@ variable "bedrock_model_id" {
   type        = string
 }
 
+variable "bedrock_region" {
+  description = "Region for Bedrock inference. Null uses the application AWS region."
+  type        = string
+  default     = null
+}
+
+variable "model_temperature" {
+  description = "Optional model sampling temperature. Null omits the parameter."
+  type        = number
+  default     = null
+}
+
+variable "model_max_output_tokens" {
+  description = "Optional maximum output tokens per model request."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.model_max_output_tokens == null || var.model_max_output_tokens > 0
+    error_message = "model_max_output_tokens must be positive when set."
+  }
+}
+
 variable "lambda_timeout" {
   description = "Lambda timeout in seconds. Must cover worst-case LLM + DynamoDB latency."
   type        = number

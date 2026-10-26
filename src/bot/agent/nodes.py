@@ -1,10 +1,9 @@
 """LangGraph node functions for the expenses bot agent graph."""
 
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import Any
 
 import boto3
-from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
@@ -13,31 +12,13 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.utils import count_tokens_approximately
 
+from src.bot.agent.model import ChatModel, build_bedrock_model
+from src.bot.agent.model import tools as tools
 from src.bot.agent.prompts import get_system_prompt
 from src.bot.agent.state import AgentState
 from src.bot.config import settings
 from src.bot.storage.dynamodb import get_item
 from src.bot.timezones import DEFAULT_TIMEZONE, local_date
-from src.bot.tools import expenses, trip
-
-tools = [
-    expenses.add_expense,
-    expenses.edit_expense,
-    expenses.delete_expense,
-    expenses.get_all_expenses,
-    trip.start_trip,
-    trip.set_trip_timezone,
-    trip.end_trip,
-]
-
-
-class ChatModel(Protocol):
-    """The tool-bound model interface used by the graph and evaluator."""
-
-    def invoke(self, messages: list[BaseMessage], /) -> BaseMessage:
-        """Return the next assistant message, or raise the provider's error."""
-        ...
-
 
 llm_with_tools: ChatModel | None = None
 
@@ -50,11 +31,15 @@ def _default_model() -> ChatModel:
     """
     global llm_with_tools
     if llm_with_tools is None:
-        llm_with_tools = ChatBedrockConverse(
-            client=boto3.client("bedrock-runtime", region_name=settings.AWS_REGION),
-            model_id=settings.AWS_BEDROCK_MODEL_ID,
+        llm_with_tools = build_bedrock_model(
+            boto3.client(
+                "bedrock-runtime",
+                region_name=settings.AWS_BEDROCK_REGION or settings.AWS_REGION,
+            ),
+            settings.AWS_BEDROCK_MODEL_ID,
             temperature=settings.MODEL_TEMPERATURE,
-        ).bind_tools(tools)
+            max_tokens=settings.MODEL_MAX_OUTPUT_TOKENS,
+        )
     return llm_with_tools
 
 

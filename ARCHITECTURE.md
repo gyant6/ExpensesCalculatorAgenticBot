@@ -2,7 +2,7 @@
 
 ## Overview
 
-An agentic Telegram chatbot — *Zuzu* — that helps users track overseas travel expenses. The agent uses LangGraph for stateful conversation management, Claude Haiku on AWS Bedrock as the LLM, and DynamoDB as the sole database (conversation history + expenses).
+An agentic Telegram chatbot — *Zuzu* — that helps users track overseas travel expenses. The agent uses LangGraph for stateful conversation management, MiniMax M2.5 on AWS Bedrock as the LLM, and DynamoDB as the sole database (conversation history + expenses).
 
 ---
 
@@ -10,7 +10,7 @@ An agentic Telegram chatbot — *Zuzu* — that helps users track overseas trave
 
 | Concern | Choice | Reason |
 |---|---|---|
-| LLM | Claude Haiku (`global.anthropic.claude-haiku-4-5-20251001-v1:0`) on Bedrock | Fast responses, low cost, sufficient for structured extraction |
+| LLM | MiniMax M2.5 (`minimax.minimax-m2.5`) on Bedrock | Evaluated for the bot's tool use and conversations |
 | Agent framework | LangGraph | Stateful agent execution with built-in checkpointing |
 | LLM integration | `langchain-aws` (`ChatBedrockConverse`) | First-class LangChain/LangGraph integration with Bedrock |
 | Telegram | `python-telegram-bot` | Well-maintained, supports both polling (local) and webhook (Lambda) |
@@ -220,7 +220,7 @@ The batch case exists because routing a mixed batch either way loses a call sile
 entirely. Rejecting the whole batch is the only option that neither drops a tool call nor
 deletes a trip without asking.
 
-This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls Claude Haiku with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. `tools_node` edges back through `check_trip_status`, so a trip started or moved to another time zone earlier in the turn — "start trip in Seoul, coffee 5" — is re-read, with its local date, before the model records the coffee; the other two tool nodes edge straight back to `agent_node`. The loop continues until Claude returns a plain message.
+This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls the configured Bedrock model with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. `tools_node` edges back through `check_trip_status`, so a trip started or moved to another time zone earlier in the turn — "start trip in Seoul, coffee 5" — is re-read, with its local date, before the model records the coffee; the other two tool nodes edge straight back to `agent_node`. The loop continues until the model returns a plain message.
 
 `end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
 
@@ -539,8 +539,10 @@ silent bot, and restoring data or Terraform state — are in [RUNBOOK.md](RUNBOO
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 
 # AWS
-AWS_REGION=ap-southeast-2
-AWS_BEDROCK_MODEL_ID=global.anthropic.claude-haiku-4-5-20251001-v1:0
+AWS_REGION=ap-southeast-1
+AWS_BEDROCK_REGION=ap-southeast-2
+AWS_BEDROCK_MODEL_ID=minimax.minimax-m2.5
+MODEL_MAX_OUTPUT_TOKENS=4096
 AWS_ACCESS_KEY_ID=          # local: from ~/.aws/credentials; Lambda: IAM role
 AWS_SECRET_ACCESS_KEY=      # local: from ~/.aws/credentials; Lambda: IAM role
 
@@ -648,7 +650,8 @@ uv run python -m scripts.compare_models --model <id> [--no-temperature] \
 ```
 
 Use it before changing the model, its settings or the system prompt. `--model` is
-required because the local `.env` need not name the model production runs.
+required because the local `.env` need not name the model production runs. Production
+and both evaluation scripts use the same Bedrock model factory and tool definitions.
 
 Inspect failures involving weekday dates and destination-based trip creation before
 changing the prompt or model. Keep benchmark outputs separate from the architecture

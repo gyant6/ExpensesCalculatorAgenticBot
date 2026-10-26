@@ -53,8 +53,10 @@ locals {
   bot_function_name   = "ExpensesCalculatorAgenticBot"
   chart_function_name = "ExpensesCalculatorAgenticBot-charts"
 
-  # Strips the cross-region routing prefix, so global.anthropic.claude-haiku-4-5... names
-  # the foundation model anthropic.claude-haiku-4-5... that the profile routes to.
+  bedrock_region               = coalesce(var.bedrock_region, var.aws_region)
+  bedrock_is_inference_profile = can(regex("^(global|us|eu|apac)\\.", var.bedrock_model_id))
+
+  # Strips a cross-region routing prefix when an inference profile is selected.
   bedrock_foundation_model_id = replace(var.bedrock_model_id, "/^(global|us|eu|apac)\\./", "")
 }
 
@@ -141,16 +143,17 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
         Resource = aws_dynamodb_table.expenses.arn
       },
       {
-        # Invoking through an inference profile is authorised against both the profile
-        # and every foundation model it can route to, so granting only one of the two
-        # fails at runtime. The region wildcard covers a global profile's routing.
+        # A direct foundation model needs only its own regional ARN. Inference profiles
+        # also need the profile ARN and the foundation models they can route to.
         Sid    = "Bedrock"
         Effect = "Allow"
         Action = ["bedrock:InvokeModel"]
-        Resource = [
-          "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
+        Resource = local.bedrock_is_inference_profile ? tolist([
+          "arn:aws:bedrock:${local.bedrock_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
           "arn:aws:bedrock:*::foundation-model/${local.bedrock_foundation_model_id}"
-        ]
+          ]) : tolist([
+          "arn:aws:bedrock:${local.bedrock_region}::foundation-model/${var.bedrock_model_id}"
+        ])
       },
       {
         Sid    = "SSMSecrets"
@@ -326,11 +329,12 @@ resource "aws_lambda_function" "bot" {
   memory_size   = var.lambda_memory_mb
 
   environment {
-    variables = {
+    variables = merge({
       # AWS_REGION is deliberately absent: it is a reserved Lambda environment variable,
       # set by the runtime, and supplying it here is rejected at deploy time.
       ENVIRONMENT                  = "production"
       AWS_BEDROCK_MODEL_ID         = var.bedrock_model_id
+      AWS_BEDROCK_REGION           = local.bedrock_region
       DYNAMODB_TABLE_NAME          = var.dynamodb_table_name
       LOG_LEVEL                    = "INFO"
       CHECKPOINT_TTL_SECONDS       = "7776000"
@@ -339,7 +343,11 @@ resource "aws_lambda_function" "bot" {
       WEBHOOK_SECRET_SSM_PATH      = local.ssm_webhook_secret_path
       CHART_LAMBDA_FUNCTION_NAME   = local.chart_function_name
       CHART_LAMBDA_TIMEOUT_SECONDS = tostring(var.chart_client_timeout)
-    }
+      }, var.model_temperature == null ? {} : {
+      MODEL_TEMPERATURE = tostring(var.model_temperature)
+      }, var.model_max_output_tokens == null ? {} : {
+      MODEL_MAX_OUTPUT_TOKENS = tostring(var.model_max_output_tokens)
+    })
   }
 
   lifecycle {

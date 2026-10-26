@@ -38,7 +38,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
-    from src.bot.agent.nodes import ChatModel
+    from src.bot.agent.model import ChatModel
 
 DEFAULT_SCENARIOS = Path(__file__).with_name("evaluation_scenarios.json")
 EVALUATION_TABLE_PREFIX = "ExpensesModelEval_"

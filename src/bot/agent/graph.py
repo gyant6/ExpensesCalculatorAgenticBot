@@ -12,10 +12,11 @@ from langgraph.graph.state import CompiledStateGraph, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph_checkpoint_aws import DynamoDBSaver
 
-from src.bot.agent.nodes import ChatModel, agent_node, check_trip_status
+from src.bot.agent.model import ChatModel, tools
+from src.bot.agent.nodes import agent_node, check_trip_status
 from src.bot.agent.state import AgentState
 from src.bot.config import settings
-from src.bot.tools import expenses, trip
+from src.bot.tools import trip
 
 logger = logging.getLogger(__name__)
 
@@ -177,16 +178,7 @@ def build_graph(
     )
     workflow.add_node(
         "tools_node",
-        ToolNode(
-            [
-                trip.start_trip,
-                trip.set_trip_timezone,
-                expenses.add_expense,
-                expenses.edit_expense,
-                expenses.delete_expense,
-                expenses.get_all_expenses,
-            ]
-        ),
+        ToolNode([tool for tool in tools if tool is not trip.end_trip]),
     )
     workflow.add_node(END_TRIP_NODE, ToolNode([trip.end_trip]))
     workflow.add_node("end_trip_batch_error_node", end_trip_batch_error_node)

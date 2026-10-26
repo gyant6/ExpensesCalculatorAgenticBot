@@ -43,15 +43,14 @@ from typing import Any, Final
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.messages.tool import ToolCall
 
 from scripts.deploy_lambda import resolve_profile
 from scripts.evaluate_model import BudgetExceeded, MeteredModel
 from scripts.model_scenarios import SCENARIOS, Accepted, ExpectedCall, Scenario
-from src.bot.agent.nodes import ChatModel
-from src.bot.agent.nodes import tools as BOT_TOOLS
+from src.bot.agent.model import ChatModel, build_bedrock_model
+from src.bot.agent.model import tools as BOT_TOOLS
 from src.bot.agent.prompts import get_system_prompt
 from src.bot.config import settings
 
@@ -266,18 +265,17 @@ def build_model(
     client_config: Config | None = None,
 ) -> ChatModel:
     """The chat model with the bot's tools bound, as agent_node calls it."""
-    llm = ChatBedrockConverse(
-        client=session.client(
+    return build_bedrock_model(
+        session.client(
             "bedrock-runtime",
-            region_name=region or settings.AWS_REGION,
+            region_name=region or settings.AWS_BEDROCK_REGION or settings.AWS_REGION,
             config=client_config or _CLIENT_CONFIG,
         ),
-        model_id=model_id,
+        model_id,
         temperature=temperature,
-        additional_model_request_fields=request_fields,
+        request_fields=request_fields,
         max_tokens=max_tokens,
     )
-    return llm.bind_tools(BOT_TOOLS)
 
 
 def _parse_request_fields(raw: str) -> dict[str, Any]:
@@ -411,7 +409,9 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(
                     {
                         "model": args.model,
-                        "region": args.region or settings.AWS_REGION,
+                        "region": args.region
+                        or settings.AWS_BEDROCK_REGION
+                        or settings.AWS_REGION,
                         "temperature": temperature_sent,
                         "request_fields": args.request_fields,
                         "results": [asdict(r) for r in results],

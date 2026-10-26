@@ -19,8 +19,10 @@
 
 aws_region = "ap-southeast-1"
 
-dynamodb_table_name = "ExpensesCalculator"
-bedrock_model_id    = "global.anthropic.claude-haiku-4-5-20251001-v1:0"
+dynamodb_table_name     = "ExpensesCalculator"
+bedrock_model_id        = "minimax.minimax-m2.5"
+bedrock_region          = "ap-southeast-2"
+model_max_output_tokens = 4096
 
 # The bot's own ceiling. Must cover the worst case of a trip end: a Bedrock call, the FX
 # fetch, the chart invoke, then a second Bedrock call to write the summary.
