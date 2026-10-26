@@ -783,9 +783,12 @@ point-in-time recovery on the table, and S3-staged deploys
 
 #### Security hardening
 
-- [ ] CloudWatch structured logging validation. Logs are JSON with a record per turn
-  ([0014](docs/decisions/0014-structured-logs-with-a-record-per-turn.md)); what remains
-  is confirming in production that no line carries a secret, using the RUNBOOK queries
+- [x] CloudWatch structured logging validation. On 26 Oct 2026, all retained bot Lambda
+  log events were scanned: no line contained the then-current bot token or webhook secret
+  in raw or URL-encoded form, and no bot-token-shaped string appeared. Since 10 Oct, all
+  application lines parsed as JSON and turn records had their expected fields. Older
+  non-JSON lines predate structured logging
+  ([0014](docs/decisions/0014-structured-logs-with-a-record-per-turn.md)).
 
 #### Bedrock Guardrails
 
