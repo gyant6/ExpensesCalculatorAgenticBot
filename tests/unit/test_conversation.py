@@ -167,19 +167,19 @@ def test_mixed_end_trip_batch_cannot_bypass_confirmation(
             {"id": "jklmnopqr", "name": "get_all_expenses", "args": {}},
         ],
     )
-    graph = build_graph(
-        model=ScriptedModel(mixed, tool_call("end_trip"), AIMessage("Summary"))
-    )
+    model = ScriptedModel(mixed, tool_call("end_trip"))
+    graph = build_graph(model=model)
     send_message(graph, "test-ledger", "End trip", MESSAGE_TIME)
     assert dynamodb.get_item("USER#test-ledger", "TRIP#ACTIVE") is not None
     assert awaiting_confirmation(graph.get_state(config_for("test-ledger")))
     confirmed = confirm_end_trip(graph, "test-ledger")
     assert confirmed.trip_ended
-    # Cleanup must wait until the caller delivers the summary.
+    # Cleanup must wait until the caller delivers the code-calculated summary.
     assert (
         graph.get_state(config_for("test-ledger")).values["messages"][-1].content
-        == "Summary"
+        == "Trip ended. No expenses were recorded. 🐾"
     )
+    assert not model.replies
 
 
 def test_dev_runner_does_not_report_a_no_op_resume_as_success(
@@ -214,6 +214,35 @@ def test_confirmation_verification_requests_a_strongly_consistent_read(
     monkeypatch.setattr(dynamodb, "get_client", lambda: client)
     graph = MagicMock()
     graph.get_state.return_value = MagicMock(next=("end_trip_node",))
-    graph.invoke.return_value = {"messages": [AIMessage("Ended")]}
+    graph.invoke.return_value = {
+        "messages": [
+            ToolMessage(
+                "Trip successfully ended.\n\ndate,summary,category,amount,currency,amount_sgd,payment_method\r\n",
+                tool_call_id="t",
+                name="end_trip",
+            ),
+            AIMessage("Ended"),
+        ]
+    }
     assert confirm_end_trip(graph, "fictional").trip_ended
     assert client.get_item.call_args.kwargs["ConsistentRead"] is True
+
+
+def test_confirmation_ignores_a_stale_success_in_prior_history() -> None:
+    old_success = ToolMessage(
+        "Trip successfully ended.\n\ndate,summary,category,amount,currency,amount_sgd,payment_method\r\n",
+        tool_call_id="old",
+        name="end_trip",
+    )
+    graph = MagicMock()
+    graph.get_state.return_value = MagicMock(
+        next=("end_trip_node",), values={"messages": [old_success]}
+    )
+    graph.invoke.return_value = {"messages": [old_success, AIMessage("Ended")]}
+    read = MagicMock(return_value=None)
+
+    confirmation = confirm_end_trip(graph, "fictional", trip_reader=read)
+
+    assert not confirmation.trip_ended
+    assert confirmation.csv_bytes is None
+    read.assert_not_called()

@@ -7,7 +7,7 @@ import io
 
 import pytest
 
-from src.bot.export import CSV_FIELDNAMES, generate_csv, to_sgd
+from src.bot.export import CSV_FIELDNAMES, generate_csv, summarize_csv, to_sgd
 
 _FX = {"JPY": 110.0, "USD": 0.74, "VND": 17500.0}
 
@@ -109,3 +109,51 @@ def test_generate_csv_preserves_original_amount_and_currency() -> None:
     rows = _parse_csv(generate_csv([_expense(amount="8000", currency="JPY")], _FX))
     assert rows[0]["amount"] == "8000"
     assert rows[0]["currency"] == "JPY"
+
+
+def test_summary_sums_the_rounded_csv_cells_by_category() -> None:
+    expenses = [
+        _expense(amount="1", currency="JPY", category="Food"),
+        _expense(amount="1", currency="JPY", category="Food"),
+        _expense(amount="4.00", currency="SGD", category="Transport"),
+    ]
+    csv_bytes = generate_csv(expenses, {"JPY": 3.0})
+
+    assert [row["amount_sgd"] for row in _parse_csv(csv_bytes)] == [
+        "0.33",
+        "0.33",
+        "4.00",
+    ]
+    assert summarize_csv(csv_bytes) == (
+        "Trip ended! 3 expenses recorded. 🐾\n"
+        "Total: SGD 4.66\nFood: SGD 0.66\nTransport: SGD 4.00"
+    )
+
+
+def test_summary_uses_original_currency_totals_when_a_rate_is_missing() -> None:
+    csv_bytes = generate_csv(
+        [
+            _expense(amount="10", currency="SGD"),
+            _expense(amount="50", currency="EUR"),
+            _expense(amount="20", currency="EUR"),
+        ],
+        {},
+    )
+
+    assert summarize_csv(csv_bytes) == (
+        "Trip ended! 3 expenses recorded. 🐾\n"
+        "SGD conversion unavailable for some expenses.\n"
+        "EUR: 70.00\nSGD: 10.00"
+    )
+
+
+def test_summary_of_empty_trip_has_no_total() -> None:
+    assert summarize_csv(generate_csv([], {})) == (
+        "Trip ended. No expenses were recorded. 🐾"
+    )
+
+
+def test_summary_rejects_non_finite_csv_amount() -> None:
+    csv_bytes = generate_csv([_expense(amount="NaN", currency="SGD")], {})
+    with pytest.raises(ValueError, match="non-finite|invalid amount"):
+        summarize_csv(csv_bytes)

@@ -23,6 +23,7 @@ from src.bot.conversation import (
     config_for,
     confirm_end_trip,
     extract_text,
+    render_confirmed_trip,
     send_message,
 )
 
@@ -58,6 +59,7 @@ def run(user_id: str) -> None:
 
         state = graph.get_state(config)
         trip_ended = False
+        confirmed_reply: str | None = None
 
         if awaiting_confirmation(state):
             # Graph is paused before end_trip_node — treat this turn as the confirmation.
@@ -69,6 +71,7 @@ def run(user_id: str) -> None:
                     clear_thread_history(graph, thread_id)
                     continue
                 trip_ended = confirmation.trip_ended
+                confirmed_reply, _ = render_confirmed_trip(confirmation)
             else:
                 result = cancel_end_trip(graph, user_id, state=state)
         else:
@@ -83,10 +86,12 @@ def run(user_id: str) -> None:
             )
         else:
             last_msg = result["messages"][-1]
-            print(f"Bot: {extract_text(last_msg.content) or 'Done.'}\n")
+            print(
+                f"Bot: {confirmed_reply or extract_text(last_msg.content) or 'Done.'}\n"
+            )
 
         if trip_ended:
-            # After the summary has been printed — it was written from this history.
+            # After the code-calculated summary has been printed.
             clear_thread_history(graph, thread_id)
 
 

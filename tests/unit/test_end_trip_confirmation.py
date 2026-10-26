@@ -14,7 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from telegram import Message
 
 from src.bot import telegram_handler
@@ -24,6 +24,9 @@ from src.bot.agent.graph import (
     THREAD_SCHEMA_VERSION,
     thread_id_for,
 )
+from src.bot.conversation import ConfirmationResult, render_confirmed_trip
+from src.bot.export import generate_csv
+from src.bot.tools.trip import END_TRIP_SUCCESS
 
 LEDGER = 111111111
 
@@ -33,7 +36,29 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """A confirmed end-trip tap with the graph, storage and Telegram replaced."""
     graph = MagicMock()
     graph.get_state.return_value = MagicMock(next=(END_TRIP_NODE,))
-    graph.invoke.return_value = {"messages": [AIMessage("Trip summary: SGD 20.00")]}
+    csv_bytes = generate_csv(
+        [
+            {
+                "date": "2026-10-09",
+                "summary": "Lunch",
+                "category": "Food",
+                "amount": "20",
+                "currency": "SGD",
+                "payment_method": "Cash",
+            }
+        ],
+        {},
+    )
+    graph.invoke.return_value = {
+        "messages": [
+            ToolMessage(
+                f"{END_TRIP_SUCCESS}\n\n{csv_bytes.decode()}",
+                tool_call_id="t",
+                name="end_trip",
+            ),
+            AIMessage("Trip summary: SGD 200.00"),
+        ]
+    }
     monkeypatch.setattr(telegram_handler, "_graph", graph)
 
     monkeypatch.setattr(telegram_handler, "_acknowledge_callback", AsyncMock())
@@ -44,7 +69,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         telegram_handler,
         "_render_attachments",
-        MagicMock(return_value=(b"pie", b"bar", b"csv")),
+        MagicMock(return_value=(b"pie", b"bar", b"different CSV")),
     )
     clear = MagicMock()
     monkeypatch.setattr(telegram_handler, "clear_thread_history", clear)
@@ -70,6 +95,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "graph": graph,
         "clear": clear,
         "trip_item": trip_item,
+        "csv_bytes": csv_bytes,
     }
 
 
@@ -104,10 +130,17 @@ async def test_an_ended_trip_sends_the_summary_and_files_then_clears(
     await telegram_handler.handle_callback(harness["update"], MagicMock())
 
     last_edit = harness["query"].edit_message_text.await_args
-    assert last_edit.args[0] == "Trip summary: SGD 20.00"
+    assert (
+        last_edit.args[0]
+        == "Trip ended! 1 expense recorded. 🐾\nTotal: SGD 20.00\nFood: SGD 20.00"
+    )
     assert harness["message"].reply_photo.await_count == 2
     assert harness["trip_item"].call_args.kwargs == {"consistent_read": True}
     harness["message"].reply_document.assert_awaited_once()
+    assert (
+        harness["message"].reply_document.await_args.args[0].getvalue()
+        == harness["csv_bytes"]
+    )
     harness["clear"].assert_called_once_with(
         harness["graph"], thread_id_for(str(LEDGER))
     )
@@ -126,3 +159,29 @@ async def test_the_graph_is_resumed_on_the_versioned_thread_saving_once(
 def test_thread_ids_carry_the_schema_version() -> None:
     assert thread_id_for("123") == f"123:v{THREAD_SCHEMA_VERSION}"
     assert THREAD_SCHEMA_VERSION >= 2
+
+
+def test_confirmed_trip_uses_valid_fallback_csv_after_damaged_tool_output() -> None:
+    csv_bytes = generate_csv(
+        [
+            {
+                "date": "2026-10-09",
+                "summary": "Lunch",
+                "category": "Food",
+                "amount": "20",
+                "currency": "SGD",
+                "payment_method": "Cash",
+            }
+        ],
+        {},
+    )
+    confirmation = ConfirmationResult(
+        result={"messages": [AIMessage("SGD 200.00")]},
+        trip_ended=True,
+        csv_bytes=b"damaged",
+    )
+
+    content, delivered_csv = render_confirmed_trip(confirmation, csv_bytes)
+
+    assert "Total: SGD 20.00" in content
+    assert delivered_csv == csv_bytes

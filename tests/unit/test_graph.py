@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
-from src.bot.agent.graph import custom_routes, end_trip_batch_error_node
+from src.bot.agent.graph import (
+    END_TRIP_CANCELLED,
+    custom_routes,
+    end_trip_batch_error_node,
+    end_trip_summary_node,
+    route_after_end_trip,
+)
 from src.bot.agent.state import AgentState
 from src.bot.tools.trip import end_trip
 
@@ -84,3 +90,22 @@ def test_batch_error_node_message_content_mentions_end_trip() -> None:
     result = end_trip_batch_error_node(state)
     for m in result["messages"]:
         assert "end_trip" in m.content
+
+
+def test_cancelled_trip_routes_back_to_the_agent() -> None:
+    message = ToolMessage(END_TRIP_CANCELLED, tool_call_id="t", name="end_trip")
+    assert route_after_end_trip(_state(message)) == "cancel"
+
+
+def test_successful_trip_ends_with_code_calculated_summary() -> None:
+    content = (
+        "Trip successfully ended.\n\n"
+        "date,summary,category,amount,currency,amount_sgd,payment_method\r\n"
+        "2026-10-09,Lunch,Food,20,SGD,20.00,Cash\r\n"
+    )
+    message = ToolMessage(content, tool_call_id="t", name="end_trip")
+    assert route_after_end_trip(_state(message)) == "summary"
+    summary = end_trip_summary_node(_state(message))["messages"][0]
+    assert summary.content == (
+        "Trip ended! 1 expense recorded. 🐾\nTotal: SGD 20.00\nFood: SGD 20.00"
+    )

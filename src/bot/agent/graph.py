@@ -16,6 +16,7 @@ from src.bot.agent.model import ChatModel, tools
 from src.bot.agent.nodes import agent_node, check_trip_status
 from src.bot.agent.state import AgentState
 from src.bot.config import settings
+from src.bot.export import extract_end_trip_csv, summarize_csv
 from src.bot.tools import trip
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Node name shared with telegram_handler, which inspects graph.get_state(...).next to
 # detect that the graph is paused awaiting end_trip confirmation.
 END_TRIP_NODE = "end_trip_node"
+END_TRIP_CANCELLED = "User cancelled ending the trip."
 
 # Bump whenever AgentState's fields change. A checkpoint written under an older shape can
 # leave an interrupted end_trip unable to resume: on 9 Oct 2026 a leftover `message_date`
@@ -64,8 +66,8 @@ def clear_thread_history(
     otherwise carry into the next trip's conversation, and the checkpoint would keep
     growing towards DynamoDB's 400 KB per-item limit.
 
-    Must not be called before the summary is produced: the summary is written by
-    `agent_node` after `end_trip` returns, and it reads the history this deletes.
+    Must not be called before the delivered summary and CSV are recovered from the
+    end_trip tool result held in this history.
 
     Failures are logged rather than raised. By the time this runs the user already has
     their summary and the trip records are gone, so surfacing an error would report a
@@ -147,6 +149,41 @@ def end_trip_batch_error_node(state: AgentState) -> dict[str, list[ToolMessage]]
     }
 
 
+def end_trip_summary_node(state: AgentState) -> dict[str, list[AIMessage]]:
+    """Finish a confirmed trip with code-calculated totals and no model request.
+
+    Reads the end_trip tool's CSV in the current graph state. An unsuccessful tool
+    result produces a failure acknowledgement; the caller separately verifies that
+    the active-trip marker was removed before reporting success.
+    """
+    last_message = state["messages"][-1]
+    csv_bytes = (
+        extract_end_trip_csv(str(last_message.content), trip.END_TRIP_SUCCESS)
+        if isinstance(last_message, ToolMessage) and last_message.name == "end_trip"
+        else None
+    )
+    if csv_bytes is None:
+        return {"messages": [AIMessage("I couldn't finish ending this trip.")]}
+    try:
+        summary = summarize_csv(csv_bytes)
+    except (UnicodeError, ValueError):
+        logger.exception("Could not summarize the end_trip tool CSV")
+        summary = "Trip ended, but I couldn't calculate the totals. 🐾"
+    return {"messages": [AIMessage(summary)]}
+
+
+def route_after_end_trip(state: AgentState) -> str:
+    """Send a cancelled confirmation back to the agent; summarize a tool run in code."""
+    last_message = state["messages"][-1]
+    if (
+        isinstance(last_message, ToolMessage)
+        and last_message.name == "end_trip"
+        and last_message.content == END_TRIP_CANCELLED
+    ):
+        return "cancel"
+    return "summary"
+
+
 def build_graph(
     *,
     model: ChatModel | None = None,
@@ -181,6 +218,7 @@ def build_graph(
         ToolNode([tool for tool in tools if tool is not trip.end_trip]),
     )
     workflow.add_node(END_TRIP_NODE, ToolNode([trip.end_trip]))
+    workflow.add_node("end_trip_summary_node", end_trip_summary_node)
     workflow.add_node("end_trip_batch_error_node", end_trip_batch_error_node)
 
     workflow.add_edge(START, "check_trip_status")
@@ -197,7 +235,12 @@ def build_graph(
         },
     )
     workflow.add_edge("tools_node", "check_trip_status")
-    workflow.add_edge(END_TRIP_NODE, "agent_node")
+    workflow.add_conditional_edges(
+        END_TRIP_NODE,
+        route_after_end_trip,
+        {"cancel": "agent_node", "summary": "end_trip_summary_node"},
+    )
+    workflow.add_edge("end_trip_summary_node", END)
     workflow.add_edge("end_trip_batch_error_node", "agent_node")
 
     if checkpointer is None:

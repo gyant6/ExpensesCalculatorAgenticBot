@@ -336,6 +336,7 @@ def run_scenario(
         config_for,
         confirm_end_trip,
         extract_text,
+        render_confirmed_trip,
         send_message,
     )
     from src.bot.storage import dynamodb
@@ -397,7 +398,11 @@ def run_scenario(
                     else:
                         response = cancel_end_trip(graph, ledger_id, state=before)
                     new_messages = response["messages"][previous_count:]
-                    entry["reply"] = extract_text(response["messages"][-1].content)
+                    entry["reply"] = (
+                        render_confirmed_trip(confirmation)[0]
+                        if ended
+                        else extract_text(response["messages"][-1].content)
+                    )
                 except PendingConfirmationError as error:
                     new_messages = []
                     entry.update(reply=str(error), blocked=True)

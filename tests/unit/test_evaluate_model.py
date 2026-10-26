@@ -69,7 +69,7 @@ def test_complete_conversation_executes_real_tools_with_fixed_fx_and_time(
     model = ScriptedModel(
         *_lunch_replies(),
         tool_call("end_trip"),
-        AIMessage("Trip summary" if name == "confirm_trip_end" else "Cancelled"),
+        *([AIMessage("Cancelled")] if name == "cancel_trip_end" else []),
     )
     result = evaluation.run_scenario(
         build_graph(model=model), scenario, "fictional-eval-ledger", suite.fx_rates
@@ -81,6 +81,7 @@ def test_complete_conversation_executes_real_tools_with_fixed_fx_and_time(
     if name == "confirm_trip_end":
         archive = dynamodb.query_by_prefix("USER#fictional-eval-ledger", "ARCHIVE#")
         assert len(archive) == 1 and len(archive[0]["expenses"]) == 1
+        assert "Total: SGD 12.00" in result["steps"][-1]["reply"]
         last_messages = result["steps"][-1]["messages"]
         assert any(
             "12.00" in str(message["data"]["content"]) for message in last_messages

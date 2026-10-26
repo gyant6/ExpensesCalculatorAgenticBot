@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -12,8 +13,17 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import StateSnapshot
 
-from src.bot.agent.graph import CHECKPOINT_DURABILITY, END_TRIP_NODE, thread_id_for
+from src.bot.agent.graph import (
+    CHECKPOINT_DURABILITY,
+    END_TRIP_CANCELLED,
+    END_TRIP_NODE,
+    thread_id_for,
+)
+from src.bot.export import extract_end_trip_csv, summarize_csv
 from src.bot.storage import dynamodb
+from src.bot.tools.trip import END_TRIP_SUCCESS
+
+logger = logging.getLogger(__name__)
 
 
 class PendingConfirmationError(ValueError):
@@ -26,10 +36,50 @@ class NoPendingConfirmationError(ValueError):
 
 @dataclass(frozen=True)
 class ConfirmationResult:
-    """A resumed graph result and whether the active-trip marker was removed."""
+    """A resumed graph result, verified trip state and the end_trip CSV export."""
 
     result: dict[str, Any]
     trip_ended: bool
+    csv_bytes: bytes | None
+
+
+def _end_trip_csv(messages: list[Any]) -> bytes | None:
+    """Extract the CSV produced by the successful end_trip tool invocation."""
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage) or message.name != "end_trip":
+            continue
+        csv_bytes = extract_end_trip_csv(str(message.content), END_TRIP_SUCCESS)
+        if csv_bytes is not None:
+            return csv_bytes
+    return None
+
+
+def _end_trip_succeeded(messages: list[Any]) -> bool:
+    """Check that this resume contains an end_trip success tool result."""
+    return any(
+        isinstance(message, ToolMessage)
+        and message.name == "end_trip"
+        and str(message.content).startswith(END_TRIP_SUCCESS)
+        for message in messages
+    )
+
+
+def render_confirmed_trip(
+    confirmation: ConfirmationResult, fallback_csv: bytes | None = None
+) -> tuple[str, bytes | None]:
+    """Return a code-calculated message and its matching CSV for a confirmed trip.
+
+    The graph's model reply is not used for monetary figures. The pre-rendered CSV is
+    a fallback if the tool result cannot be recovered after the trip was deleted.
+    """
+    for csv_bytes in (confirmation.csv_bytes, fallback_csv):
+        if csv_bytes is None:
+            continue
+        try:
+            return summarize_csv(csv_bytes), csv_bytes
+        except (UnicodeError, ValueError):
+            logger.exception("Could not summarize the confirmed trip CSV")
+    return "Trip ended, but I couldn't calculate the totals. 🐾", None
 
 
 def config_for(ledger_id: str) -> RunnableConfig:
@@ -87,20 +137,24 @@ def confirm_end_trip(
     the result, then clears history; a failed resume must not be reported as success.
     """
     config = config_for(ledger_id)
-    if not awaiting_confirmation(
-        state if state is not None else graph.get_state(config)
-    ):
+    current = state if state is not None else graph.get_state(config)
+    if not awaiting_confirmation(current):
         raise NoPendingConfirmationError(
             "This confirmation has already been processed."
         )
+    previous_count = len(current.values.get("messages", []))
     result = graph.invoke(None, config, durability=CHECKPOINT_DURABILITY)
     read = (
         trip_reader
         if trip_reader is not None
         else partial(dynamodb.get_item, consistent_read=True)
     )
+    messages = result["messages"][previous_count:]
     return ConfirmationResult(
-        result=result, trip_ended=read(f"USER#{ledger_id}", "TRIP#ACTIVE") is None
+        result=result,
+        trip_ended=_end_trip_succeeded(messages)
+        and read(f"USER#{ledger_id}", "TRIP#ACTIVE") is None,
+        csv_bytes=_end_trip_csv(messages),
     )
 
 
@@ -130,7 +184,7 @@ def cancel_end_trip(
         {
             "messages": [
                 ToolMessage(
-                    content="User cancelled ending the trip.",
+                    content=END_TRIP_CANCELLED,
                     tool_call_id=pending[0]["id"],
                     name=pending[0]["name"],
                 )

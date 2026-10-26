@@ -18,6 +18,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 
 from src.bot import telegram_handler
 from src.bot.agent.graph import END_TRIP_NODE
+from src.bot.export import generate_csv
+from src.bot.tools.trip import END_TRIP_SUCCESS
 from src.bot.turn_log import (
     TEXT_MAX_CHARS,
     TOOL_RESULT_MAX_CHARS,
@@ -312,11 +314,25 @@ async def test_a_confirmed_end_logs_end_trips_result_and_the_expense_count(
 ) -> None:
     update, graph = button_turn["update"], button_turn["graph"]
     update.callback_query.data = telegram_handler._END_TRIP_CONFIRM
+    csv_text = generate_csv(
+        [
+            {
+                "date": "2026-10-09",
+                "summary": "Snack",
+                "category": "Food",
+                "amount": "5",
+                "currency": "SGD",
+                "payment_method": "Cash",
+            }
+        ],
+        {},
+    ).decode()
+    tool_output = f"{END_TRIP_SUCCESS}\n\n{csv_text}"
     graph.invoke.return_value = {
         "messages": [
             *_PAUSED,
-            ToolMessage("date,amount\n2026-10-09,5", tool_call_id="t", name="end_trip"),
-            AIMessage("Trip summary: SGD 5.00"),
+            ToolMessage(tool_output, tool_call_id="t", name="end_trip"),
+            AIMessage("Trip summary: SGD 500.00"),
         ]
     }
 
@@ -327,10 +343,11 @@ async def test_a_confirmed_end_logs_end_trips_result_and_the_expense_count(
     assert fields["kind"] == "end_trip_confirmed"
     assert fields["outcome"] == "replied"
     assert fields["user_message"] is None
-    assert fields["steps"] == [
-        {"tool": "end_trip", "result": "date,amount\n2026-10-09,5"}
-    ]
-    assert fields["reply"] == "Trip summary: SGD 5.00"
+    assert fields["steps"] == [{"tool": "end_trip", "result": tool_output}]
+    assert (
+        fields["reply"]
+        == "Trip ended! 1 expense recorded. 🐾\nTotal: SGD 5.00\nFood: SGD 5.00"
+    )
     assert fields["expenses"] == 3
     assert (fields["sender"], fields["update_id"]) == (SENDER, 8)
 

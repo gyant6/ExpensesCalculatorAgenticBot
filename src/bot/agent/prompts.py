@@ -81,10 +81,8 @@ end the current trip before starting a new one.
   what, if anything, should be added.
 - When the user asks you to end a trip, call the tool get_all_expenses and then immediately call the tool end_trip.
   Do not ask for confirmation before calling end_trip. Do not generate a summary before calling end_trip.
-  After end_trip completes, you will receive a CSV of all expenses with an amount_sgd column showing each expense in SGD.
-  Use that data to output:
-  1. A friendly 2-3 sentence summary of the trip, including the total SGD spend.
-  2. A separate per-category breakdown: one line per category in the format "Category: SGD X.XX".
+  After confirmation, the application calculates and sends the final totals and category
+  breakdown from the CSV.
 """
 
     # Last, so everything above stays byte-identical from one day to the next.

@@ -49,6 +49,7 @@ from src.bot.conversation import (
     config_for,
     confirm_end_trip,
     extract_text,
+    render_confirmed_trip,
     send_message,
 )
 from src.bot.export import generate_csv
@@ -87,8 +88,8 @@ _MESSAGE_NOT_MODIFIED = "not modified"
 _QUERY_EXPIRED = "query is too old"
 
 # Shown in place of the confirmation keyboard while the trip is being ended, then
-# overwritten with the summary. Ending a trip takes several seconds — an FX fetch, chart
-# rendering, and two model round trips — so the tap needs visible acknowledgement.
+# overwritten with the summary. Ending a trip takes several seconds for FX, chart
+# rendering and storage operations, so the tap needs visible acknowledgement.
 _ENDING_TRIP_NOTICE = "Ending your trip and putting your summary together…"
 
 # Shown when the resumed graph returns but the trip is still active, so end_trip did not
@@ -706,7 +707,7 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
 
     On confirm, the attachments are rendered from live data and then the graph is resumed,
     which runs the end_trip tool — the tool performs the export and the deletion and
-    returns the CSV that the agent turns into a summary. On cancel, a ToolMessage is
+    returns the CSV that the application turns into a summary. On cancel, a ToolMessage is
     injected so the agent knows the action was cancelled, then its reply is sent.
 
     Args:
@@ -752,8 +753,8 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
     if query.data == _END_TRIP_CONFIRM:
         turn_context["kind"] = TurnKind.END_TRIP_CONFIRMED
 
-        # Ending a trip takes several seconds — an FX fetch, chart rendering and two model
-        # round trips — so say so rather than leaving the tap unacknowledged. This message
+        # Ending a trip takes several seconds for FX, charts and storage, so say so
+        # rather than leaving the tap unacknowledged. This message
         # is edited again with the summary below, so nothing extra appears in the chat.
         await query.edit_message_text(_ENDING_TRIP_NOTICE)
 
@@ -813,14 +814,14 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        content = _extract_text(result["messages"][-1].content) or "Trip ended."
+        content, delivered_csv = render_confirmed_trip(confirmation, csv_bytes)
 
         with _timed(timings, "send"):
             await _edit_in_chunks(query, content)
-            await _send_attachments(query, pie_bytes, bar_bytes, csv_bytes)
+            await _send_attachments(query, pie_bytes, bar_bytes, delivered_csv)
 
-        # Only once the summary and files are delivered: this discards the history the
-        # summary was written from, and the next trip starts with a clean thread.
+        # Only once the summary and files are delivered: the tool-result CSV came from
+        # this history, and the next trip starts with a clean thread.
         with _timed(timings, "clear"):
             await asyncio.to_thread(
                 clear_thread_history, _graph, thread_id_for(ledger_id)

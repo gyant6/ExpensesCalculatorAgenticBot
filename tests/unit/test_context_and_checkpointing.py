@@ -212,7 +212,6 @@ def test_a_paused_trip_end_resumes_when_saved_once_per_turn(
     model = _ScriptedModel(
         [
             AIMessage("", tool_calls=[{"id": "e", "name": "end_trip", "args": {}}]),
-            AIMessage("Trip summary!"),
         ]
     )
     with (
@@ -232,5 +231,6 @@ def test_a_paused_trip_end_resumes_when_saved_once_per_turn(
 
         result = app.invoke(None, _config("t2"), durability=CHECKPOINT_DURABILITY)
 
-    assert result["messages"][-1].content == "Trip summary!"
+    assert result["messages"][-1].content == "Trip ended. No expenses were recorded. 🐾"
+    assert not model.replies
     assert dynamodb.get_item("USER#1", "TRIP#ACTIVE") is None

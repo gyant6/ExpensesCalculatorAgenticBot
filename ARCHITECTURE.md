@@ -220,11 +220,11 @@ The batch case exists because routing a mixed batch either way loses a call sile
 entirely. Rejecting the whole batch is the only option that neither drops a tool call nor
 deletes a trip without asking.
 
-This is a standard ReAct loop implemented as a LangGraph graph. `agent_node` calls the configured Bedrock model with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. `tools_node` edges back through `check_trip_status`, so a trip started or moved to another time zone earlier in the turn — "start trip in Seoul, coffee 5" — is re-read, with its local date, before the model records the coffee; the other two tool nodes edge straight back to `agent_node`. The loop continues until the model returns a plain message.
+This is a ReAct loop implemented as a LangGraph graph. `agent_node` calls the configured Bedrock model with the bound tools. `custom_routes` then inspects the last message: anything that is not an `AIMessage` carrying tool calls ends the turn, an `end_trip` call on its own routes to `end_trip_node`, `end_trip` mixed with other tools routes to `end_trip_batch_error_node`, and any other tool call routes to `tools_node`. `tools_node` edges back through `check_trip_status`, so a trip started or moved to another time zone earlier in the turn — "start trip in Seoul, coffee 5" — is re-read, with its local date, before the model records the coffee. A confirmed `end_trip` runs the code-only summary node and ends the graph; a cancellation returns to `agent_node` for a reply.
 
 `end_trip` sits in its own node so that `interrupt_before=["end_trip_node"]` pauses that one tool without interrupting any of the others. This provides one structural guarantee: `end_trip` can never execute on the same turn the LLM first decides to call it. When the LLM emits an `end_trip` tool call, the graph pauses before the node runs, persists state to the checkpointer, and returns. `handle_message` detects the interrupted state via `graph.get_state(config).next` (non-empty when interrupted) and sends a Yes/No inline keyboard.
 
-Confirmation arrives as a callback query rather than as a new text message. `handle_callback` first renders the chart and CSV attachments from the still-live expense data, then resumes with `graph.invoke(None, config)` so `end_trip_node` genuinely executes: the tool performs the export and the deletion and returns the CSV that `agent_node` turns into a summary. Once that summary and the attachments have been delivered, the handler calls `clear_thread_history` to delete the thread's checkpoints. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
+Confirmation arrives as a callback query rather than as a new text message. `handle_callback` first renders charts and a fallback CSV from the still-live expense data, then resumes with `graph.invoke(None, config)` so `end_trip_node` genuinely executes. The tool performs the export and deletion; the next graph node calculates the summary from that tool-result CSV without another inference request. The handler uses the same CSV for the delivered totals and attachment. Once the text and attachments have been delivered, it calls `clear_thread_history` to delete the thread's checkpoints. While the graph is interrupted, `handle_message` declines new text messages and asks the user to confirm or cancel first.
 
 ### End-of-Trip Sequence
 
@@ -263,7 +263,7 @@ sequenceDiagram
         opt Trip has expenses
             Handler->>FX: Fetch rates for attachments
             FX-->>Handler: Rates, or unavailable
-            Handler->>Handler: Build CSV attachment
+            Handler->>Handler: Build fallback CSV
             opt FX rates available
                 Handler->>Charts: Render charts from expenses and rates
                 Charts-->>Handler: PNGs, or no charts on failure
@@ -280,15 +280,16 @@ sequenceDiagram
             Graph->>DB: Archive expenses before deletion
         end
         Graph->>DB: Delete live expenses and active-trip marker
-        Graph->>Graph: agent_node writes summary via Bedrock
+        Graph->>Graph: Code-only summary node calculates totals from CSV
         Graph->>DB: Save completed-turn checkpoint
-        Graph-->>Handler: Return summary
+        Graph-->>Handler: Return tool-result CSV and calculated summary
         Handler->>DB: Check whether active-trip marker remains
         DB-->>Handler: Trip status
         alt Trip is still active
             Handler-->>User: Report failure and withhold summary and files
             Handler->>DB: Clear checkpoints so a new request can retry
         else Trip has ended
+            Handler->>Handler: Calculate totals from tool-result CSV
             Handler-->>User: Send summary and available attachments
             Handler->>DB: Clear conversation checkpoints after delivery
         end
@@ -297,7 +298,8 @@ sequenceDiagram
 
 Duplicate or stale confirmations return before either branch. Attachment-generation
 failures can omit individual files; unexpected graph errors follow the normal handler
-error path. The two FX fetches are independent and can return different rates.
+error path. The chart and tool-result FX fetches can return different rates; the delivered
+CSV and text totals always use the same values.
 
 ### State Definition
 
@@ -328,7 +330,7 @@ class AgentState(MessagesState):
 - `thread_id` = `thread_id_for(ledger_id)` = `"<ledger_id>:v<THREAD_SCHEMA_VERSION>"`. Bump the version whenever `AgentState` changes, so a thread written under the old shape is never resumed ([0012](docs/decisions/0012-versioned-conversation-threads.md))
 - LangGraph checkpointer (`langgraph-checkpoint-aws`, `DynamoDBSaver`) persists the full `messages` list to DynamoDB once per turn: every `graph.invoke` passes `durability=CHECKPOINT_DURABILITY` (`"exit"`), which saves when the run finishes or pauses at the end-trip confirmation, not after every step
 - The model sees only the last ~`MODEL_HISTORY_TOKEN_BUDGET` tokens of that history (`bounded_history`, cut at the start of a user message); the checkpoint keeps it all ([0013](docs/decisions/0013-bounded-history-and-once-per-turn-checkpoints.md))
-- When a trip ends: the `end_trip` tool deletes all expense and trip items, then the caller (`telegram_handler` or `dev_runner`) calls `clear_thread_history` to delete every checkpoint for this `thread_id`. `handle_callback` first checks `TRIP#ACTIVE` is gone; if the resume left the trip active, it reports the failure instead of a summary, sends no files, and clears the thread so the next "end trip" starts over. The deletion cannot live in the tool — `agent_node` writes the summary after the tool returns, using the very history being deleted, so it runs only once the summary and attachments have been delivered
+- When a trip ends: the `end_trip` tool deletes all expense and trip items, then the caller (`telegram_handler` or `dev_runner`) calls `clear_thread_history` to delete every checkpoint for this `thread_id`. `handle_callback` checks for a successful tool result and verifies `TRIP#ACTIVE` is gone; otherwise it reports failure, sends no files, and clears the thread so the next "end trip" starts over. The caller keeps the checkpoint until it has recovered the tool-result CSV and delivered the calculated summary
 - When a trip starts: a fresh checkpoint begins automatically on the next message
 
 ---
@@ -457,19 +459,19 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
   4. Builds the CSV via `generate_csv(expenses, fx_rates)` — before any deletion, so a failed export leaves the trip intact rather than destroying records with no copy of them.
   5. Writes the `ARCHIVE#<ended_at>` item holding every expense, with a `ttl` 90 days out. Skipped for a trip with no expenses. If this write fails, the tool fails and nothing is deleted.
   6. Deletes every `EXPENSE#*` item and the `TRIP#ACTIVE` item.
-- **Returns (to LLM):** A confirmation line followed by the CSV of all expenses, including the `amount_sgd` column, so the summary is written from real figures. If rates were unavailable, `amount_sgd` is blank and the CSV is prefixed with an instruction to give per-currency totals and state no SGD total — without that instruction the model invents an exchange rate to satisfy the system prompt's request for one.
+- **Returns (to graph):** A confirmation line followed by the CSV of all expenses, including the `amount_sgd` column. The code-only summary node uses this CSV for the delivered totals. If rates were unavailable, foreign-currency rows have a blank `amount_sgd` cell.
 - **On confirm (`handle_callback`):**
-  1. Renders the charts and the CSV attachment from the live expense data. This must precede the resume, because the tool deletes that data.
+  1. Renders charts and a fallback CSV from the live expense data before the tool deletes it.
   2. Resumes the graph with `graph.invoke(None, config)`, which runs the node described above.
-  3. Sends the agent's summary text, then the two charts and `expenses.csv`.
+  3. Calculates totals from the rounded `amount_sgd` cells in the tool's CSV. If any conversion is missing, reports original-currency totals instead of a partial SGD grand total. Sends the calculated text, charts and the same CSV; the pre-rendered CSV is used only if the tool result cannot be recovered.
   4. Calls `clear_thread_history` to delete the thread's checkpoints.
-- **Sent to user:** LLM summary text → pie chart photo → bar chart photo → `expenses.csv` file attachment.
+- **Sent to user:** Code-calculated summary text → pie chart photo → bar chart photo → `expenses.csv` file attachment.
 
 ### 7. `get_sgd_exchange_rates`
 - **Input:** _(none)_
 - **Action:** `GET https://api.fxratesapi.com/latest?base=SGD`. Fetches all rates with SGD as the base.
 - **Returns:** `dict` mapping currency codes to their rate relative to SGD (e.g. `{"JPY": 167.5, "USD": 0.74}`). To convert a foreign amount to SGD: `sgd_amount = foreign_amount / rates[currency]`.
-- **Note:** Synchronous and not bound to the LLM. For a non-empty trip, `end_trip` fetches rates for the CSV returned to the model; `_render_attachments` separately fetches rates shared by the chart payload and CSV attachment. These two fetches can produce different snapshots.
+- **Note:** Synchronous and not bound to the LLM. For a non-empty trip, `end_trip` fetches rates for the delivered CSV; `_render_attachments` separately fetches rates for charts and a fallback CSV. Chart figures can therefore use a different rate snapshot from the text and delivered CSV.
 
 ---
 
@@ -495,7 +497,7 @@ FX conversion happens at end_trip, never at write time:
   JPY expense: sgd_amount = 1200 / 167.5 = 7.16
   SGD expense: sgd_amount = 12 (no conversion)
 
-The model's CSV and the delivered attachments can use separate rate snapshots.
+The text totals and delivered CSV use one rate snapshot. Charts can use another.
 ```
 
 ---
@@ -505,15 +507,16 @@ The model's CSV and the delivered attachments can use separate rate snapshots.
 Sent to the user as four Telegram messages in sequence:
 
 **Message 1 — Text (plain text):**
-LLM-generated warm summary (2–3 sentences) including total SGD spend, followed by a
-per-category SGD breakdown, one line per category:
+Code-calculated total SGD spend and per-category breakdown, one line per category:
 ```
-What a trip! You spent a total of SGD 58.82 across 7 expenses over 4 days.
-
+Trip ended! 7 expenses recorded. 🐾
+Total: SGD 58.82
 Food: SGD 32.10
 Transport: SGD 15.44
 Leisure: SGD 11.28
 ```
+
+If any `amount_sgd` cell is blank, the message gives totals by original currency instead.
 
 **Message 2 — Photo:** Pie chart of spending by category (PNG, rendered in memory by the chart Lambda; in-process locally).
 
@@ -624,7 +627,7 @@ The sequence, and what each part is actually testing:
 | `/auth list`, `/auth`, `/auth banana` | The admin command's list, usage and unknown-subcommand branches |
 | Start a trip; add expenses in three currencies, one with no currency named, one dated "yesterday" | `amount` persisted as a DynamoDB Number; the SGD default; relative date resolution against the trip-local date |
 | List, edit one amount, delete another, list again | Targeting by expense id and expected amount; fields updated in place; `source_message` appended rather than replaced |
-| End trip, confirm | The interrupt and inline keyboard; **compare the SGD total in the summary text against the sum of `amount_sgd` in the CSV** — a mismatch indicates a summary error or inconsistent rate snapshots |
+| End trip, confirm | The interrupt and inline keyboard; compare the code-calculated SGD total against the sum of `amount_sgd` in the delivered CSV |
 | Ask about the previous trip | `clear_thread_history`: the table should hold no checkpoint items and the agent should not recall the trip |
 | Tap the confirmation button repeatedly | `_claim_confirmation` — one summary and one set of attachments, not several |
 
@@ -704,8 +707,8 @@ conservative cost reservation when usage is unavailable.
 Mocked-model tests use the real graph, tools and DynamoDB checkpointer with moto. The
 longer scripted conversation crosses the unchanged 8,000-token history limit and checks
 that earlier expenses remain retrievable after history trimming and checkpoint reload.
-Live-model consistency still needs repeated paid runs. Provider/storage failure recovery,
-numerical summary checks and a LangSmith integration remain future work. The evaluator
+Live-model consistency still needs repeated paid runs. Provider/storage failure recovery
+and a LangSmith integration remain future work. The evaluator
 does not test Telegram delivery or chart attachments.
 
 ### Coverage
@@ -854,9 +857,12 @@ Validate token use and checkpoint overhead under representative workloads.
   using the shared evaluator. Before migration, validate model-specific request settings,
   prompt caching, reasoning across checkpointed turns, refusal handling, pricing and
   deployment permissions.
-- [ ] **End-of-trip analysis using totals computed in code.** Calculate totals and
-  breakdowns from the same data used for the CSV, then pass those figures to a dedicated
-  summary node. Evaluate a stronger model for spending patterns and outliers while
+- [x] **Calculate end-of-trip totals in code.** Build the delivered total and category
+  breakdown from the rounded values in the attached CSV, with original-currency totals
+  when conversion is incomplete. Share this behavior across Telegram, the dev runner
+  and model evaluation.
+- [ ] **Add optional end-of-trip analysis.** Use the dedicated summary node to pass
+  computed figures to a stronger model for spending patterns and outliers while
   keeping routine chat on a lower-cost model. Validate summary accuracy and configure
   model access and deployment permissions before enabling it.
 

@@ -27,6 +27,27 @@ CSV_FIELDNAMES = [
 ]
 
 
+def extract_end_trip_csv(content: str, success_prefix: str) -> bytes | None:
+    """Recover the generated CSV from a successful end_trip tool result."""
+    if not content.startswith(success_prefix):
+        return None
+    start = content.find(",".join(CSV_FIELDNAMES))
+    return content[start:].encode("utf-8") if start >= 0 else None
+
+
+def _money_cell(raw: str | None) -> Decimal:
+    """Parse a finite amount from a CSV cell or reject a damaged export."""
+    if raw is None:
+        raise ValueError("Trip CSV contains a missing amount")
+    try:
+        amount = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ValueError("Trip CSV contains an invalid amount") from exc
+    if not amount.is_finite():
+        raise ValueError("Trip CSV contains a non-finite amount")
+    return amount
+
+
 def to_sgd(expense: dict[str, Any], fx_rates: dict[str, float]) -> float | None:
     """Convert one expense's amount to SGD.
 
@@ -92,3 +113,54 @@ def generate_csv(expenses: list[dict[str, Any]], fx_rates: dict[str, float]) -> 
             }
         )
     return buf.getvalue().encode("utf-8")
+
+
+def summarize_csv(csv_bytes: bytes) -> str:
+    """Build the final trip totals from the exact CSV delivered to the user.
+
+    SGD figures sum the already-rounded amount_sgd cells, so the message agrees
+    with the attachment. If any row lacks a conversion, report original-currency
+    totals instead of presenting a partial SGD grand total.
+
+    Args:
+        csv_bytes: UTF-8 output from generate_csv.
+
+    Returns:
+        A plain-text trip summary with deterministic totals.
+
+    Raises:
+        ValueError: If the CSV has no expected columns or has an invalid amount.
+    """
+    reader = csv.DictReader(io.StringIO(csv_bytes.decode("utf-8")))
+    if reader.fieldnames != CSV_FIELDNAMES:
+        raise ValueError("Trip CSV has unexpected columns")
+
+    rows = list(reader)
+    if not rows:
+        return "Trip ended. No expenses were recorded. 🐾"
+
+    count = len(rows)
+    intro = f"Trip ended! {count} expense{'s' if count != 1 else ''} recorded. 🐾"
+    if all(row["amount_sgd"] for row in rows):
+        total = Decimal(0)
+        categories: dict[str, Decimal] = {}
+        for row in rows:
+            amount = _money_cell(row["amount_sgd"])
+            total += amount
+            category = row["category"]
+            categories[category] = categories.get(category, Decimal(0)) + amount
+        breakdown = "\n".join(
+            f"{category}: SGD {amount:,.2f}"
+            for category, amount in sorted(categories.items())
+        )
+        return f"{intro}\nTotal: SGD {total:,.2f}\n{breakdown}"
+
+    currencies: dict[str, Decimal] = {}
+    for row in rows:
+        amount = _money_cell(row["amount"])
+        currency = row["currency"]
+        currencies[currency] = currencies.get(currency, Decimal(0)) + amount
+    breakdown = "\n".join(
+        f"{currency}: {amount:,.2f}" for currency, amount in sorted(currencies.items())
+    )
+    return f"{intro}\nSGD conversion unavailable for some expenses.\n{breakdown}"
