@@ -69,8 +69,9 @@ def render_confirmed_trip(
 ) -> tuple[str, bytes | None]:
     """Return a code-calculated message and its matching CSV for a confirmed trip.
 
-    The graph's model reply is not used for monetary figures. The pre-rendered CSV is
-    a fallback if the tool result cannot be recovered after the trip was deleted.
+    The graph ends with the end_trip tool result; the caller renders the reply from its
+    CSV. The pre-rendered CSV is a fallback if the tool result cannot be recovered after
+    the trip was deleted.
     """
     for csv_bytes in (confirmation.csv_bytes, fallback_csv):
         if csv_bytes is None:

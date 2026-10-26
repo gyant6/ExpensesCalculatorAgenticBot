@@ -22,6 +22,7 @@ from src.bot.conversation import (
     cancel_end_trip,
     config_for,
     confirm_end_trip,
+    render_confirmed_trip,
     send_message,
 )
 from src.bot.storage import dynamodb
@@ -174,10 +175,11 @@ def test_mixed_end_trip_batch_cannot_bypass_confirmation(
     assert awaiting_confirmation(graph.get_state(config_for("test-ledger")))
     confirmed = confirm_end_trip(graph, "test-ledger")
     assert confirmed.trip_ended
-    # Cleanup must wait until the caller delivers the code-calculated summary.
-    assert (
-        graph.get_state(config_for("test-ledger")).values["messages"][-1].content
-        == "Trip ended. No expenses were recorded. 🐾"
+    # The graph leaves the tool result for the caller to render and deliver.
+    last_message = graph.get_state(config_for("test-ledger")).values["messages"][-1]
+    assert isinstance(last_message, ToolMessage)
+    assert render_confirmed_trip(confirmed)[0] == (
+        "Trip ended. No expenses were recorded. 🐾"
     )
     assert not model.replies
 

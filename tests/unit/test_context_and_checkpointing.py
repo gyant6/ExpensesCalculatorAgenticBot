@@ -231,6 +231,7 @@ def test_a_paused_trip_end_resumes_when_saved_once_per_turn(
 
         result = app.invoke(None, _config("t2"), durability=CHECKPOINT_DURABILITY)
 
-    assert result["messages"][-1].content == "Trip ended. No expenses were recorded. 🐾"
+    assert isinstance(result["messages"][-1], ToolMessage)
+    assert result["messages"][-1].name == "end_trip"
     assert not model.replies
     assert dynamodb.get_item("USER#1", "TRIP#ACTIVE") is None

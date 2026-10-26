@@ -125,6 +125,7 @@ def test_a_long_tool_result_is_cut_and_says_so(
     assert result.startswith("x" * TOOL_RESULT_MAX_CHARS)
     assert result.endswith("[25 more characters]")
     assert fields["reply"].endswith("[1 more characters]")
+    assert fields["model_calls"] == 1
 
 
 def test_a_refused_tool_call_records_its_status(
@@ -146,7 +147,6 @@ def test_a_result_for_an_earlier_turns_call_is_listed_on_its_own(
     # After "Yes": end_trip was called in the previous turn; only its result is new.
     messages = [
         ToolMessage("date,summary,amount\n...", tool_call_id="t", name="end_trip"),
-        AIMessage("Trip summary"),
     ]
     with caplog.at_level(logging.INFO):
         _log(kind=TurnKind.END_TRIP_CONFIRMED, new_messages=messages)
@@ -332,7 +332,6 @@ async def test_a_confirmed_end_logs_end_trips_result_and_the_expense_count(
         "messages": [
             *_PAUSED,
             ToolMessage(tool_output, tool_call_id="t", name="end_trip"),
-            AIMessage("Trip summary: SGD 500.00"),
         ]
     }
 
@@ -344,6 +343,9 @@ async def test_a_confirmed_end_logs_end_trips_result_and_the_expense_count(
     assert fields["outcome"] == "replied"
     assert fields["user_message"] is None
     assert fields["steps"] == [{"tool": "end_trip", "result": tool_output}]
+    assert fields["model_calls"] == 0
+    assert fields["input_tokens"] == 0
+    assert fields["output_tokens"] == 0
     assert (
         fields["reply"]
         == "Trip ended! 1 expense recorded. 🐾\nTotal: SGD 5.00\nFood: SGD 5.00"

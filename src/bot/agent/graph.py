@@ -16,7 +16,6 @@ from src.bot.agent.model import ChatModel, tools
 from src.bot.agent.nodes import agent_node, check_trip_status
 from src.bot.agent.state import AgentState
 from src.bot.config import settings
-from src.bot.export import extract_end_trip_csv, summarize_csv
 from src.bot.tools import trip
 
 logger = logging.getLogger(__name__)
@@ -149,31 +148,8 @@ def end_trip_batch_error_node(state: AgentState) -> dict[str, list[ToolMessage]]
     }
 
 
-def end_trip_summary_node(state: AgentState) -> dict[str, list[AIMessage]]:
-    """Finish a confirmed trip with code-calculated totals and no model request.
-
-    Reads the end_trip tool's CSV in the current graph state. An unsuccessful tool
-    result produces a failure acknowledgement; the caller separately verifies that
-    the active-trip marker was removed before reporting success.
-    """
-    last_message = state["messages"][-1]
-    csv_bytes = (
-        extract_end_trip_csv(str(last_message.content), trip.END_TRIP_SUCCESS)
-        if isinstance(last_message, ToolMessage) and last_message.name == "end_trip"
-        else None
-    )
-    if csv_bytes is None:
-        return {"messages": [AIMessage("I couldn't finish ending this trip.")]}
-    try:
-        summary = summarize_csv(csv_bytes)
-    except (UnicodeError, ValueError):
-        logger.exception("Could not summarize the end_trip tool CSV")
-        summary = "Trip ended, but I couldn't calculate the totals. 🐾"
-    return {"messages": [AIMessage(summary)]}
-
-
 def route_after_end_trip(state: AgentState) -> str:
-    """Send a cancelled confirmation back to the agent; summarize a tool run in code."""
+    """Send a cancellation back to the agent; leave a completed tool run to the caller."""
     last_message = state["messages"][-1]
     if (
         isinstance(last_message, ToolMessage)
@@ -181,7 +157,7 @@ def route_after_end_trip(state: AgentState) -> str:
         and last_message.content == END_TRIP_CANCELLED
     ):
         return "cancel"
-    return "summary"
+    return END
 
 
 def build_graph(
@@ -218,7 +194,6 @@ def build_graph(
         ToolNode([tool for tool in tools if tool is not trip.end_trip]),
     )
     workflow.add_node(END_TRIP_NODE, ToolNode([trip.end_trip]))
-    workflow.add_node("end_trip_summary_node", end_trip_summary_node)
     workflow.add_node("end_trip_batch_error_node", end_trip_batch_error_node)
 
     workflow.add_edge(START, "check_trip_status")
@@ -238,9 +213,8 @@ def build_graph(
     workflow.add_conditional_edges(
         END_TRIP_NODE,
         route_after_end_trip,
-        {"cancel": "agent_node", "summary": "end_trip_summary_node"},
+        {"cancel": "agent_node", END: END},
     )
-    workflow.add_edge("end_trip_summary_node", END)
     workflow.add_edge("end_trip_batch_error_node", "agent_node")
 
     if checkpointer is None:
