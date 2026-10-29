@@ -17,6 +17,8 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 
 from src.bot.storage import dynamodb
+from src.bot.storage.dynamodb import WriteOutcome
+from src.bot.tools.trip_state import TRIP_ENDING, trip_not_ending
 
 CATEGORIES = {
     "Food",
@@ -79,7 +81,9 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def list_expenses(ledger_id: str) -> list[dict[str, Any]]:
+def list_expenses(
+    ledger_id: str, *, consistent_read: bool = False
+) -> list[dict[str, Any]]:
     """Return every expense in a ledger, in the order the user should see them.
 
     Sorted by the date the expense happened, then by when it was recorded, so the
@@ -87,6 +91,8 @@ def list_expenses(ledger_id: str) -> list[dict[str, Any]]:
 
     Args:
         ledger_id: The ledger (Telegram chat ID) whose expenses to list.
+        consistent_read: Include every expense written before the call, as end_trip
+            needs; an ordinary listing can afford to miss one from the last second.
 
     Returns:
         The expense items as plain dicts, oldest first. Empty if there are none.
@@ -94,7 +100,9 @@ def list_expenses(ledger_id: str) -> list[dict[str, Any]]:
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    items = dynamodb.query_by_prefix(f"USER#{ledger_id}", EXPENSE_SK_PREFIX)
+    items = dynamodb.query_by_prefix(
+        f"USER#{ledger_id}", EXPENSE_SK_PREFIX, consistent_read=consistent_read
+    )
     return sorted(items, key=lambda item: (item["date"], item.get("created_at", "")))
 
 
@@ -208,7 +216,7 @@ def add_expense(
 
     Returns:
         A confirmation string with the expense's id, or an error string describing what
-        was invalid.
+        was invalid or saying the trip is being ended.
 
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
@@ -227,7 +235,9 @@ def add_expense(
     now = _now_utc()
     for _ in range(_MAX_ID_ATTEMPTS):
         expense_id = _new_expense_id()
-        written = dynamodb.put_item_if_absent(
+        # Guarded so an expense cannot land after end_trip has read the trip's
+        # expenses, where it would be neither archived nor deleted.
+        outcome = dynamodb.guarded_put_if_absent(
             {
                 "PK": f"USER#{ledger_id}",
                 "SK": f"{EXPENSE_SK_PREFIX}{expense_id}",
@@ -243,9 +253,12 @@ def add_expense(
                 "payment_method": payment_method,
                 "created_at": now,
                 "updated_at": now,
-            }
+            },
+            trip_not_ending(ledger_id),
         )
-        if written:
+        if outcome is WriteOutcome.GUARD_FAILED:
+            return TRIP_ENDING
+        if outcome is WriteOutcome.APPLIED:
             return f"Expense recorded with id {expense_id}."
     raise RuntimeError(
         f"Could not find an unused expense id in {_MAX_ID_ATTEMPTS} attempts for "
@@ -297,7 +310,8 @@ def edit_expense(
     Returns:
         A confirmation string on success, or an error string if nothing was to change,
         the id is unknown, the amount did not match, a field value failed validation,
-        or another message changed or deleted the expense while this one was handled.
+        another message changed or deleted the expense while this one was handled, or
+        the trip is being ended.
 
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
@@ -336,7 +350,7 @@ def edit_expense(
     # expense being as it was read: the amount check above and the appended
     # source_message both came from that read, and a concurrent edit would otherwise be
     # silently overwritten.
-    updated = dynamodb.update_item_if_unchanged(
+    outcome = dynamodb.guarded_update_if_unchanged(
         item["PK"],
         item["SK"],
         {
@@ -345,8 +359,11 @@ def edit_expense(
             "updated_at": _now_utc(),
         },
         expected=_as_read(item),
+        guard=trip_not_ending(ledger_id),
     )
-    if not updated:
+    if outcome is WriteOutcome.GUARD_FAILED:
+        return TRIP_ENDING
+    if outcome is WriteOutcome.ITEM_CONDITION_FAILED:
         return _changed_meanwhile(expense_id)
     return "Edit expense successful."
 
@@ -373,8 +390,8 @@ def delete_expense(
 
     Returns:
         A confirmation string on success, or an error string if the id is unknown, the
-        amount did not match, or another message changed or deleted the expense while
-        this one was handled.
+        amount did not match, another message changed or deleted the expense while this
+        one was handled, or the trip is being ended.
 
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
@@ -385,10 +402,15 @@ def delete_expense(
 
     # Conditional for the same reason as edit_expense: the amount check came from the
     # read, so an edit landing in between must not be deleted unseen.
-    deleted = dynamodb.delete_item_if_unchanged(
-        item["PK"], item["SK"], expected=_as_read(item)
+    outcome = dynamodb.guarded_delete_if_unchanged(
+        item["PK"],
+        item["SK"],
+        expected=_as_read(item),
+        guard=trip_not_ending(ledger_id),
     )
-    if not deleted:
+    if outcome is WriteOutcome.GUARD_FAILED:
+        return TRIP_ENDING
+    if outcome is WriteOutcome.ITEM_CONDITION_FAILED:
         return _changed_meanwhile(expense_id)
     return "Expense deleted."
 

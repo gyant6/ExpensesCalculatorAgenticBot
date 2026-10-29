@@ -7,9 +7,14 @@ application settings so the same code works against DynamoDB Local and real AWS.
 
 from __future__ import annotations
 
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
-import boto3
+import boto3.session
 from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
 from botocore.exceptions import ClientError
 
@@ -28,22 +33,64 @@ TTL_ATTRIBUTE: Final = "ttl"
 # Error code DynamoDB returns when a write's ConditionExpression evaluates false.
 _CONDITION_FAILED: Final = "ConditionalCheckFailedException"
 
+# A single-item write that hits an item while a transaction is committing on it fails
+# with this code. A cancelled transaction instead reports one reason per item, and
+# these are the two reasons acted on.
+_TRANSACTION_CONFLICT: Final = "TransactionConflictException"
+_TRANSACTION_CANCELLED: Final = "TransactionCanceledException"
+_REASON_CONFLICT: Final = "TransactionConflict"
+_REASON_CONDITION_FAILED: Final = "ConditionalCheckFailed"
+
+# A conflict clears once the other transaction commits, within milliseconds. Four
+# attempts with a growing pause wait at most 0.3 s in total.
+_CONFLICT_ATTEMPTS: Final = 4
+_CONFLICT_BACKOFF_SECONDS: Final = 0.05
+
+
+_clients: dict[tuple[str | None, str], DynamoDBClient] = {}
+_clients_lock = threading.Lock()
+
 
 def get_client() -> DynamoDBClient:
-    """Create and return a boto3 DynamoDB client configured from application settings.
+    """Return the shared DynamoDB client for the configured endpoint and region.
 
-    Returns a new client on each call so that the mock context is respected in tests.
-    In production, connects to real DynamoDB using the region from settings. Locally,
-    routes to DynamoDB Local via DYNAMODB_ENDPOINT_URL if set.
+    The client is created once and reused. A boto3 client is safe to share between
+    threads, but creating one is not: boto3.client() builds on a default session that
+    is not thread-safe, and LangGraph's tool node runs a turn's tool calls — two
+    add_expense calls for "coffee 5, taxi 12" — on parallel threads. Creation therefore
+    happens under a lock, from a session of its own. Reuse also skips loading the
+    service model and resolving credentials on every request. Credentials from the
+    Lambda role refresh inside the client, so a long-lived client does not go stale.
+
+    Clients are keyed by endpoint and region, which tests change; production uses one.
+    In production, connects to real DynamoDB in the configured region. Locally, routes
+    to DynamoDB Local via DYNAMODB_ENDPOINT_URL if set.
 
     Returns:
         A boto3 DynamoDB client.
     """
-    return boto3.client(
-        "dynamodb",
-        endpoint_url=settings.DYNAMODB_ENDPOINT_URL,
-        region_name=settings.AWS_REGION,
-    )
+    key = (settings.DYNAMODB_ENDPOINT_URL, settings.AWS_REGION)
+    client = _clients.get(key)
+    if client is not None:
+        return client
+    with _clients_lock:
+        client = _clients.get(key)
+        if client is None:
+            client = boto3.session.Session().client(
+                "dynamodb", endpoint_url=key[0], region_name=key[1]
+            )
+            _clients[key] = client
+    return client
+
+
+def reset_clients() -> None:
+    """Discard the shared clients so the next get_client builds a new one.
+
+    For tests, which change credentials or start a new mock between cases. Production
+    code has no reason to call it.
+    """
+    with _clients_lock:
+        _clients.clear()
 
 
 def _expected_state_condition(
@@ -104,7 +151,8 @@ def update_item(pk: str, sk: str, fields: dict[str, Any]) -> None:
     exp_attr_names = {f"#{field}": f"{field}" for field in fields.keys()}
     exp_attr_values = {f":{k}": serializer.serialize(v) for k, v in fields.items()}
 
-    get_client().update_item(
+    _send_write(
+        get_client().update_item,
         TableName=settings.DYNAMODB_TABLE_NAME,
         Key={"PK": {"S": pk}, "SK": {"S": sk}},
         UpdateExpression=update_exp_str,
@@ -112,6 +160,96 @@ def update_item(pk: str, sk: str, fields: dict[str, Any]) -> None:
         ExpressionAttributeValues=exp_attr_values,
         ConditionExpression="attribute_exists(PK)",
     )
+
+
+def _update_if_unchanged_request(
+    pk: str, sk: str, fields: dict[str, Any], expected: dict[str, Any]
+) -> dict[str, Any]:
+    """Build an UpdateItem request applied only if the item still matches `expected`.
+
+    The same shape serves a plain update_item call and an Update inside a transaction.
+
+    Raises:
+        ValueError: If fields or expected is empty.
+    """
+    if not fields:
+        raise ValueError("fields must not be empty")
+    condition, condition_names, condition_values = _expected_state_condition(expected)
+    return {
+        "TableName": settings.DYNAMODB_TABLE_NAME,
+        "Key": {"PK": {"S": pk}, "SK": {"S": sk}},
+        "UpdateExpression": "SET " + ", ".join(f"#{name} = :{name}" for name in fields),
+        "ConditionExpression": f"attribute_exists(PK) AND {condition}",
+        "ExpressionAttributeNames": {
+            **{f"#{name}": name for name in fields},
+            **condition_names,
+        },
+        "ExpressionAttributeValues": {
+            **{f":{name}": serializer.serialize(v) for name, v in fields.items()},
+            **condition_values,
+        },
+    }
+
+
+def _delete_if_unchanged_request(
+    pk: str, sk: str, expected: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a DeleteItem request applied only if the item still matches `expected`.
+
+    Raises:
+        ValueError: If expected is empty.
+    """
+    condition, condition_names, condition_values = _expected_state_condition(expected)
+    request: dict[str, Any] = {
+        "TableName": settings.DYNAMODB_TABLE_NAME,
+        "Key": {"PK": {"S": pk}, "SK": {"S": sk}},
+        "ConditionExpression": f"attribute_exists(PK) AND {condition}",
+        "ExpressionAttributeNames": condition_names,
+    }
+    # DynamoDB rejects an empty ExpressionAttributeValues, which an all-absent
+    # expectation would produce.
+    if condition_values:
+        request["ExpressionAttributeValues"] = condition_values
+    return request
+
+
+def _put_if_absent_request(item: dict[str, Any]) -> dict[str, Any]:
+    """Build a PutItem request applied only if no item exists at the item's key."""
+    return {
+        "TableName": settings.DYNAMODB_TABLE_NAME,
+        "Item": {k: serializer.serialize(v) for k, v in item.items()},
+        "ConditionExpression": "attribute_not_exists(PK)",
+    }
+
+
+def _send_write(operation: Callable[..., object], **request: Any) -> None:
+    """Send a single-item write, retrying while it collides with a transaction.
+
+    A transaction holds its items while it commits, and a plain write to one of them in
+    that moment fails with TransactionConflictException. The collision is transient —
+    the transaction finishes within milliseconds — but botocore does not retry it.
+
+    Args:
+        operation: The client method to call, e.g. get_client().put_item.
+        request: Its keyword arguments.
+
+    Raises:
+        botocore.exceptions.ClientError: If the write fails, including when it still
+            conflicts after _CONFLICT_ATTEMPTS attempts.
+    """
+    attempt = 1
+    while True:
+        try:
+            operation(**request)
+            return
+        except ClientError as exc:
+            if (
+                exc.response["Error"]["Code"] != _TRANSACTION_CONFLICT
+                or attempt >= _CONFLICT_ATTEMPTS
+            ):
+                raise
+        time.sleep(_CONFLICT_BACKOFF_SECONDS * attempt)
+        attempt += 1
 
 
 def update_item_if_unchanged(
@@ -141,26 +279,9 @@ def update_item_if_unchanged(
         botocore.exceptions.ClientError: If the request fails for any reason other than
             the condition not holding.
     """
-    if not fields:
-        raise ValueError("fields must not be empty")
-    condition, condition_names, condition_values = _expected_state_condition(expected)
-
-    update_expression = "SET " + ", ".join(f"#{name} = :{name}" for name in fields)
+    request = _update_if_unchanged_request(pk, sk, fields, expected)
     try:
-        get_client().update_item(
-            TableName=settings.DYNAMODB_TABLE_NAME,
-            Key={"PK": {"S": pk}, "SK": {"S": sk}},
-            UpdateExpression=update_expression,
-            ConditionExpression=f"attribute_exists(PK) AND {condition}",
-            ExpressionAttributeNames={
-                **{f"#{name}": name for name in fields},
-                **condition_names,
-            },
-            ExpressionAttributeValues={
-                **{f":{name}": serializer.serialize(v) for name, v in fields.items()},
-                **condition_values,
-            },
-        )
+        _send_write(get_client().update_item, **request)
     except ClientError as exc:
         if exc.response["Error"]["Code"] == _CONDITION_FAILED:
             return False
@@ -168,45 +289,164 @@ def update_item_if_unchanged(
     return True
 
 
-def delete_item_if_unchanged(pk: str, sk: str, expected: dict[str, Any]) -> bool:
-    """Delete an item only if it still holds the values it was read with.
+class WriteOutcome(StrEnum):
+    """What a guarded write did.
 
-    The delete counterpart of update_item_if_unchanged: a delete decided on from a read
-    is refused if another request changed or removed the item since.
+    Members:
+        APPLIED: The guard allowed the write and it was made.
+        ITEM_CONDITION_FAILED: The written item's own condition failed — for a put, an
+            item already existed at its key; for an update or delete, the item no longer
+            matched `expected` or no longer exists. Nothing was written.
+        GUARD_FAILED: The guard item held the forbidden value. Nothing was written.
+    """
+
+    APPLIED = "applied"
+    ITEM_CONDITION_FAILED = "item_condition_failed"
+    GUARD_FAILED = "guard_failed"
+
+
+@dataclass(frozen=True)
+class Guard:
+    """Another item whose state must allow a write, checked in the same transaction.
+
+    Attributes:
+        pk: Partition key of the item checked.
+        sk: Sort key of the item checked.
+        attribute: The attribute checked.
+        forbidden_value: The write is refused while the attribute holds this value. A
+            missing item or attribute allows it.
+    """
+
+    pk: str
+    sk: str
+    attribute: str
+    forbidden_value: Any
+
+
+def _condition_check(guard: Guard) -> dict[str, Any]:
+    """Build the transaction's ConditionCheck for a guard."""
+    return {
+        "TableName": settings.DYNAMODB_TABLE_NAME,
+        "Key": {"PK": {"S": guard.pk}, "SK": {"S": guard.sk}},
+        "ConditionExpression": (
+            "attribute_not_exists(#guarded) OR #guarded <> :forbidden"
+        ),
+        "ExpressionAttributeNames": {"#guarded": guard.attribute},
+        "ExpressionAttributeValues": {
+            ":forbidden": serializer.serialize(guard.forbidden_value)
+        },
+    }
+
+
+def _transact(guard: Guard, write: dict[str, dict[str, Any]]) -> WriteOutcome:
+    """Check a guard and make one write as a single atomic transaction.
+
+    A write cannot slip in after the guard item changes, as it could with a read
+    followed by a write: DynamoDB applies both or neither, and orders the transaction
+    against any concurrent write to the guard item.
 
     Args:
-        pk: Partition key value (e.g. 'USER#123456789').
-        sk: Sort key value (e.g. 'EXPENSE#k7qm').
-        expected: Attribute names mapped to the value each must currently have; None
-            means the attribute must be absent. Must not be empty.
+        guard: The item state that must allow the write.
+        write: One transaction item, e.g. {"Put": <PutItem request>}.
 
     Returns:
-        True if the item was deleted, False if it no longer matched `expected` or no
-        longer exists, in which case nothing was deleted.
+        Which condition, if any, stopped the write.
+
+    Raises:
+        botocore.exceptions.ClientError: If the transaction fails for any reason other
+            than a condition, including a conflict that persists for _CONFLICT_ATTEMPTS
+            attempts.
+    """
+    transact_items: list[Any] = [{"ConditionCheck": _condition_check(guard)}, write]
+    attempt = 1
+    while True:
+        try:
+            get_client().transact_write_items(TransactItems=transact_items)
+            return WriteOutcome.APPLIED
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != _TRANSACTION_CANCELLED:
+                raise
+            # One reason per transaction item, in order: the guard, then the write.
+            reasons = [
+                reason.get("Code")
+                for reason in exc.response.get("CancellationReasons", [])
+            ]
+            if reasons[:1] == [_REASON_CONDITION_FAILED]:
+                return WriteOutcome.GUARD_FAILED
+            if reasons[1:2] == [_REASON_CONDITION_FAILED]:
+                return WriteOutcome.ITEM_CONDITION_FAILED
+            if _REASON_CONFLICT not in reasons or attempt >= _CONFLICT_ATTEMPTS:
+                raise
+        time.sleep(_CONFLICT_BACKOFF_SECONDS * attempt)
+        attempt += 1
+
+
+def guarded_put_if_absent(item: dict[str, Any], guard: Guard) -> WriteOutcome:
+    """Write an item if its key is free and the guard allows it, atomically.
+
+    Args:
+        item: The full item as a plain Python dict, PK and SK included.
+        guard: The item state that must allow the write.
+
+    Returns:
+        APPLIED, ITEM_CONDITION_FAILED if an item already exists at the key, or
+        GUARD_FAILED.
+
+    Raises:
+        botocore.exceptions.ClientError: If the transaction fails for another reason.
+    """
+    return _transact(guard, {"Put": _put_if_absent_request(item)})
+
+
+def guarded_update_if_unchanged(
+    pk: str,
+    sk: str,
+    fields: dict[str, Any],
+    expected: dict[str, Any],
+    guard: Guard,
+) -> WriteOutcome:
+    """update_item_if_unchanged, made only if the guard allows it, atomically.
+
+    Args:
+        pk: Partition key value of the item to update.
+        sk: Sort key value of the item to update.
+        fields: Attribute names mapped to their new values. Must not be empty.
+        expected: Attribute names mapped to the value each must currently have; None
+            means absent. Must not be empty.
+        guard: The item state that must allow the write.
+
+    Returns:
+        APPLIED, ITEM_CONDITION_FAILED if the item changed or is gone, or GUARD_FAILED.
+
+    Raises:
+        ValueError: If fields or expected is empty.
+        botocore.exceptions.ClientError: If the transaction fails for another reason.
+    """
+    return _transact(
+        guard, {"Update": _update_if_unchanged_request(pk, sk, fields, expected)}
+    )
+
+
+def guarded_delete_if_unchanged(
+    pk: str, sk: str, expected: dict[str, Any], guard: Guard
+) -> WriteOutcome:
+    """Delete an item if it still matches `expected` and the guard allows it, atomically.
+
+    Args:
+        pk: Partition key value of the item to delete.
+        sk: Sort key value of the item to delete.
+        expected: Attribute names mapped to the value each must currently have; None
+            means absent. Must not be empty.
+        guard: The item state that must allow the write.
+
+    Returns:
+        APPLIED, ITEM_CONDITION_FAILED if the item changed or is gone, or GUARD_FAILED.
 
     Raises:
         ValueError: If expected is empty.
-        botocore.exceptions.ClientError: If the request fails for any reason other than
-            the condition not holding.
+        botocore.exceptions.ClientError: If the transaction fails for another reason.
     """
-    condition, condition_names, condition_values = _expected_state_condition(expected)
-    request: dict[str, Any] = {
-        "TableName": settings.DYNAMODB_TABLE_NAME,
-        "Key": {"PK": {"S": pk}, "SK": {"S": sk}},
-        "ConditionExpression": f"attribute_exists(PK) AND {condition}",
-        "ExpressionAttributeNames": condition_names,
-    }
-    # DynamoDB rejects an empty ExpressionAttributeValues, which an all-absent
-    # expectation would produce.
-    if condition_values:
-        request["ExpressionAttributeValues"] = condition_values
-    try:
-        get_client().delete_item(**request)
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == _CONDITION_FAILED:
-            return False
-        raise
-    return True
+    return _transact(guard, {"Delete": _delete_if_unchanged_request(pk, sk, expected)})
 
 
 def put_item(item: dict[str, Any]) -> None:
@@ -221,7 +461,11 @@ def put_item(item: dict[str, Any]) -> None:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     low_level_data = {k: serializer.serialize(v) for k, v in item.items()}
-    get_client().put_item(TableName=settings.DYNAMODB_TABLE_NAME, Item=low_level_data)
+    _send_write(
+        get_client().put_item,
+        TableName=settings.DYNAMODB_TABLE_NAME,
+        Item=low_level_data,
+    )
 
 
 def put_item_if_absent(item: dict[str, Any]) -> bool:
@@ -244,11 +488,7 @@ def put_item_if_absent(item: dict[str, Any]) -> bool:
             the key already being taken.
     """
     try:
-        get_client().put_item(
-            TableName=settings.DYNAMODB_TABLE_NAME,
-            Item={k: serializer.serialize(v) for k, v in item.items()},
-            ConditionExpression="attribute_not_exists(PK)",
-        )
+        _send_write(get_client().put_item, **_put_if_absent_request(item))
     except ClientError as exc:
         if exc.response["Error"]["Code"] == _CONDITION_FAILED:
             return False
@@ -297,8 +537,10 @@ def delete_item(pk: str, sk: str) -> None:
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    get_client().delete_item(
-        TableName=settings.DYNAMODB_TABLE_NAME, Key={"PK": {"S": pk}, "SK": {"S": sk}}
+    _send_write(
+        get_client().delete_item,
+        TableName=settings.DYNAMODB_TABLE_NAME,
+        Key={"PK": {"S": pk}, "SK": {"S": sk}},
     )
 
 
@@ -335,7 +577,9 @@ def scan_by_pk_prefix(prefix: str) -> list[dict[str, Any]]:
     ]
 
 
-def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
+def query_by_prefix(
+    pk: str, prefix: str, *, consistent_read: bool = False
+) -> list[dict[str, Any]]:
     """Fetch all items for a partition key whose sort key starts with a given prefix.
 
     Used to retrieve all expenses for a user (prefix='EXPENSE#') or to check
@@ -350,6 +594,8 @@ def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
     Args:
         pk: Partition key value (e.g. 'USER#123456789').
         prefix: Sort key prefix to filter by (e.g. 'EXPENSE#').
+        consistent_read: Include every write acknowledged before the query, rather than
+            possibly missing one from the last second. Costs twice the read capacity.
 
     Returns:
         List of matching items as plain Python dicts, in sort key order. Empty list if
@@ -365,6 +611,7 @@ def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
             TableName=settings.DYNAMODB_TABLE_NAME,
             KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
             ExpressionAttributeValues={":pk": {"S": pk}, ":prefix": {"S": prefix}},
+            ConsistentRead=consistent_read,
         )
     )
 

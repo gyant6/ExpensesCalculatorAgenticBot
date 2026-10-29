@@ -19,6 +19,7 @@ import pytest
 
 from src.bot.storage import dynamodb
 from src.bot.tools import expenses, trip
+from src.bot.tools.trip_state import TRIP_ACTIVE_SK, TRIP_ENDING
 from tests.integration.conftest import requires_dynamodb_local
 
 pytestmark = requires_dynamodb_local
@@ -198,27 +199,10 @@ def test_concurrent_edit_and_delete_apply_exactly_one(local_table: None) -> None
             assert item is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "end_trip lists the expenses once and deletes only those, so one added "
-        "while it runs is neither archived nor deleted and joins the next trip"
-    ),
-)
-def test_expense_added_while_trip_ends_is_not_left_behind(
-    local_table: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """After a trip ends, no expense may remain outside the archive.
-
-    The FX fetch sits between end_trip listing the expenses and deleting them, so adding
-    an expense from there reproduces the interleaving deterministically.
-    """
-    ledger_id = new_ledger()
-    assert start(ledger_id, "Asia/Tokyo").startswith("New trip started")
-    seed_expense(ledger_id)
-
-    def rates_with_concurrent_add() -> dict[str, float]:
-        result = expenses.add_expense.invoke(
+def add_taxi(ledger_id: str) -> str:
+    """Invoke add_expense as a second member's message would."""
+    return str(
+        expenses.add_expense.invoke(
             {
                 "ledger_id": ledger_id,
                 "local_date": "2026-10-26",
@@ -230,12 +214,84 @@ def test_expense_added_while_trip_ends_is_not_left_behind(
                 "currency": "JPY",
             }
         )
-        assert str(result).startswith("Expense recorded")
+    )
+
+
+def end(ledger_id: str) -> str:
+    """Invoke end_trip as the confirmed end-trip node would."""
+    return str(trip.end_trip.invoke({"ledger_id": ledger_id}))
+
+
+def archived_ids(ledger_id: str) -> list[str]:
+    """Sort keys of every expense in the ledger's trip archives."""
+    archives = dynamodb.query_by_prefix(
+        f"USER#{ledger_id}", trip.ARCHIVE_SK_PREFIX, consistent_read=True
+    )
+    return [expense["SK"] for archive in archives for expense in archive["expenses"]]
+
+
+def test_writes_landing_while_a_trip_ends_are_refused_not_left_behind(
+    local_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An add or edit arriving mid-way through end_trip must not escape the archive.
+
+    The FX fetch sits between end_trip reading the expenses and deleting them, so
+    writing from there reproduces that interleaving deterministically. Before the trip
+    was marked ENDING, the add here was recorded and then joined the next trip.
+    """
+    ledger_id = new_ledger()
+    assert start(ledger_id, "Asia/Tokyo").startswith("New trip started")
+    expense_id = seed_expense(ledger_id)
+    during_end: list[str] = []
+
+    def rates_with_concurrent_writes() -> dict[str, float]:
+        during_end.append(add_taxi(ledger_id))
+        during_end.append(edit(ledger_id, expense_id, "1400", "Lunch was 1400 yen"))
         return {"JPY": 200.0}
 
-    monkeypatch.setattr(trip, "get_sgd_exchange_rates", rates_with_concurrent_add)
+    monkeypatch.setattr(trip, "get_sgd_exchange_rates", rates_with_concurrent_writes)
 
-    result = str(trip.end_trip.invoke({"ledger_id": ledger_id}))
+    result = end(ledger_id)
 
     assert result.startswith(trip.END_TRIP_SUCCESS)
-    assert expenses.list_expenses(ledger_id) == []
+    assert during_end == [TRIP_ENDING, TRIP_ENDING]
+    assert expenses.list_expenses(ledger_id, consistent_read=True) == []
+    archives = dynamodb.query_by_prefix(
+        f"USER#{ledger_id}", trip.ARCHIVE_SK_PREFIX, consistent_read=True
+    )
+    assert [e["amount"] for a in archives for e in a["expenses"]] == [Decimal(1200)]
+
+
+def test_an_add_racing_end_trip_is_never_lost(
+    local_table: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whichever wins, a recorded expense is archived or survives; never neither.
+
+    The add either lands before the trip is marked ENDING, and is archived; is refused;
+    or lands after the trip is gone, as an expense recorded with no trip does.
+    """
+    monkeypatch.setattr(trip, "get_sgd_exchange_rates", lambda: {"JPY": 200.0})
+    for _ in range(ROUNDS):
+        ledger_id = new_ledger()
+        assert start(ledger_id, "Asia/Tokyo").startswith("New trip started")
+        seed_expense(ledger_id)
+
+        added, ended = race(lambda: add_taxi(ledger_id), lambda: end(ledger_id))
+
+        assert ended.startswith(trip.END_TRIP_SUCCESS), ended
+        assert (
+            dynamodb.get_item(f"USER#{ledger_id}", TRIP_ACTIVE_SK, consistent_read=True)
+            is None
+        )
+        archived = archived_ids(ledger_id)
+        remaining = [
+            e["SK"] for e in expenses.list_expenses(ledger_id, consistent_read=True)
+        ]
+        assert not set(archived) & set(remaining)
+        if added == TRIP_ENDING:
+            assert len(archived) == 1 and not remaining
+        else:
+            assert added.startswith("Expense recorded"), added
+            assert len(archived) + len(remaining) == 2
+            # A recorded taxi is in the CSV exactly when it was archived.
+            assert ("Taxi" in ended) == (len(archived) == 2)

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
+import boto3.session
 import pytest
 from botocore.exceptions import ClientError
 
@@ -208,50 +211,264 @@ def test_update_item_if_unchanged_rejects_empty_arguments(
         dynamodb.update_item_if_unchanged("unknown", "unknown", fields, expected)
 
 
-def test_delete_item_if_unchanged_deletes_when_item_matches(
+# ── guarded writes ───────────────────────────────────────────────────────────
+
+GUARD = dynamodb.Guard(
+    pk="USER#00000000", sk="TRIP#ACTIVE", attribute="status", forbidden_value="ENDING"
+)
+APPLIED = dynamodb.WriteOutcome.APPLIED
+ITEM_CONDITION_FAILED = dynamodb.WriteOutcome.ITEM_CONDITION_FAILED
+GUARD_FAILED = dynamodb.WriteOutcome.GUARD_FAILED
+
+
+def _set_guard_status(status: str) -> None:
+    dynamodb.put_item({"PK": "USER#00000000", "SK": "TRIP#ACTIVE", "status": status})
+
+
+def test_guarded_put_writes_when_the_guard_item_is_missing(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    assert dynamodb.guarded_put_if_absent(VERSIONED_ITEM, GUARD) is APPLIED
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == VERSIONED_ITEM
+
+
+def test_guarded_put_writes_when_the_guard_allows_it(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _set_guard_status("ACTIVE")
+
+    assert dynamodb.guarded_put_if_absent(VERSIONED_ITEM, GUARD) is APPLIED
+
+
+def test_guarded_put_is_refused_by_the_guard(dynamodb_table: DynamoDBClient) -> None:
+    _set_guard_status("ENDING")
+
+    assert dynamodb.guarded_put_if_absent(VERSIONED_ITEM, GUARD) is GUARD_FAILED
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") is None
+
+
+def test_guarded_put_reports_a_taken_key(dynamodb_table: DynamoDBClient) -> None:
+    dynamodb.put_item(VERSIONED_ITEM)
+
+    outcome = dynamodb.guarded_put_if_absent({**VERSIONED_ITEM, "amount": "9"}, GUARD)
+
+    assert outcome is ITEM_CONDITION_FAILED
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == VERSIONED_ITEM
+
+
+def test_guarded_update_applies_when_unchanged_and_allowed(
     dynamodb_table: DynamoDBClient,
 ) -> None:
     dynamodb.put_item(VERSIONED_ITEM)
 
-    assert dynamodb.delete_item_if_unchanged("USER#00000000", "EXPENSE#k7qm", AS_READ)
-    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") is None
+    outcome = dynamodb.guarded_update_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"amount": "1.50"}, AS_READ, GUARD
+    )
+
+    assert outcome is APPLIED
+    item = dynamodb.get_item("USER#00000000", "EXPENSE#k7qm")
+    assert item is not None
+    assert item["amount"] == "1.50"
 
 
-def test_delete_item_if_unchanged_keeps_a_changed_item(
-    dynamodb_table: DynamoDBClient,
-) -> None:
+def test_guarded_update_reports_a_changed_item(dynamodb_table: DynamoDBClient) -> None:
     changed = {**VERSIONED_ITEM, "amount": "2.00"}
     dynamodb.put_item(changed)
 
-    deleted = dynamodb.delete_item_if_unchanged(
-        "USER#00000000", "EXPENSE#k7qm", AS_READ
+    outcome = dynamodb.guarded_update_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"amount": "1.50"}, AS_READ, GUARD
     )
 
-    assert deleted is False
+    assert outcome is ITEM_CONDITION_FAILED
     assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == changed
 
 
-def test_delete_item_if_unchanged_refuses_a_missing_item(
+def test_guarded_update_is_refused_by_the_guard(
     dynamodb_table: DynamoDBClient,
 ) -> None:
-    assert not dynamodb.delete_item_if_unchanged(
-        "USER#00000000", "EXPENSE#k7qm", AS_READ
+    dynamodb.put_item(VERSIONED_ITEM)
+    _set_guard_status("ENDING")
+
+    outcome = dynamodb.guarded_update_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"amount": "1.50"}, AS_READ, GUARD
     )
 
+    assert outcome is GUARD_FAILED
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == VERSIONED_ITEM
 
-def test_delete_item_if_unchanged_accepts_only_absent_expectations(
+
+def test_guarded_delete_deletes_when_unchanged_and_allowed(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    dynamodb.put_item(VERSIONED_ITEM)
+
+    outcome = dynamodb.guarded_delete_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", AS_READ, GUARD
+    )
+
+    assert outcome is APPLIED
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") is None
+
+
+def test_guarded_delete_keeps_a_changed_item(dynamodb_table: DynamoDBClient) -> None:
+    changed = {**VERSIONED_ITEM, "amount": "2.00"}
+    dynamodb.put_item(changed)
+
+    outcome = dynamodb.guarded_delete_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", AS_READ, GUARD
+    )
+
+    assert outcome is ITEM_CONDITION_FAILED
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == changed
+
+
+def test_guarded_delete_reports_a_missing_item(dynamodb_table: DynamoDBClient) -> None:
+    outcome = dynamodb.guarded_delete_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", AS_READ, GUARD
+    )
+
+    assert outcome is ITEM_CONDITION_FAILED
+
+
+def test_guarded_delete_is_refused_by_the_guard(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    dynamodb.put_item(VERSIONED_ITEM)
+    _set_guard_status("ENDING")
+
+    outcome = dynamodb.guarded_delete_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", AS_READ, GUARD
+    )
+
+    assert outcome is GUARD_FAILED
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == VERSIONED_ITEM
+
+
+def test_guarded_delete_accepts_only_absent_expectations(
     dynamodb_table: DynamoDBClient,
 ) -> None:
     dynamodb.put_item({"PK": "USER#00000000", "SK": "EXPENSE#k7qm"})
 
-    assert dynamodb.delete_item_if_unchanged(
-        "USER#00000000", "EXPENSE#k7qm", {"updated_at": None}
+    outcome = dynamodb.guarded_delete_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"updated_at": None}, GUARD
     )
 
+    assert outcome is APPLIED
 
-def test_delete_item_if_unchanged_rejects_empty_expectations() -> None:
+
+def test_guarded_delete_rejects_empty_expectations() -> None:
     with pytest.raises(ValueError):
-        dynamodb.delete_item_if_unchanged("unknown", "unknown", {})
+        dynamodb.guarded_delete_if_unchanged("unknown", "unknown", {}, GUARD)
+
+
+# ── transaction conflicts ────────────────────────────────────────────────────
+
+
+def _client_error(code: str, reasons: list[str] | None = None) -> ClientError:
+    response: dict[str, Any] = {"Error": {"Code": code, "Message": code}}
+    if reasons is not None:
+        response["CancellationReasons"] = [{"Code": reason} for reason in reasons]
+    return ClientError(response, "operation")  # type: ignore[arg-type]
+
+
+class FlakyWriter:
+    """A client method that raises the given errors once each, then succeeds."""
+
+    def __init__(self, *errors: ClientError) -> None:
+        self.errors = list(errors)
+        self.calls = 0
+
+    def __call__(self, **request: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return {}
+
+
+class FakeWriteClient:
+    """Stands in for the DynamoDB client, routing writes to FlakyWriter instances."""
+
+    def __init__(self, writer: FlakyWriter) -> None:
+        self.put_item = writer
+        self.transact_write_items = writer
+
+
+@pytest.fixture
+def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.bot.storage.dynamodb.time.sleep", lambda _seconds: None)
+
+
+def test_a_write_retries_a_transaction_conflict(
+    monkeypatch: pytest.MonkeyPatch, no_backoff: None
+) -> None:
+    writer = FlakyWriter(_client_error("TransactionConflictException"))
+    monkeypatch.setattr(dynamodb, "get_client", lambda: FakeWriteClient(writer))
+
+    dynamodb.put_item(VERSIONED_ITEM)
+
+    assert writer.calls == 2
+
+
+def test_a_write_gives_up_on_a_persistent_conflict(
+    monkeypatch: pytest.MonkeyPatch, no_backoff: None
+) -> None:
+    conflict = _client_error("TransactionConflictException")
+    writer = FlakyWriter(*[conflict] * 4)
+    monkeypatch.setattr(dynamodb, "get_client", lambda: FakeWriteClient(writer))
+
+    with pytest.raises(ClientError):
+        dynamodb.put_item(VERSIONED_ITEM)
+    assert writer.calls == 4
+
+
+def test_a_write_does_not_retry_other_errors(
+    monkeypatch: pytest.MonkeyPatch, no_backoff: None
+) -> None:
+    writer = FlakyWriter(_client_error("ValidationException"))
+    monkeypatch.setattr(dynamodb, "get_client", lambda: FakeWriteClient(writer))
+
+    with pytest.raises(ClientError):
+        dynamodb.put_item(VERSIONED_ITEM)
+    assert writer.calls == 1
+
+
+def test_a_guarded_write_retries_a_cancelled_conflict(
+    monkeypatch: pytest.MonkeyPatch, no_backoff: None
+) -> None:
+    writer = FlakyWriter(
+        _client_error("TransactionCanceledException", ["None", "TransactionConflict"])
+    )
+    monkeypatch.setattr(dynamodb, "get_client", lambda: FakeWriteClient(writer))
+
+    assert dynamodb.guarded_put_if_absent(VERSIONED_ITEM, GUARD) is APPLIED
+    assert writer.calls == 2
+
+
+def test_a_guarded_write_gives_up_on_a_persistent_conflict(
+    monkeypatch: pytest.MonkeyPatch, no_backoff: None
+) -> None:
+    conflict = _client_error(
+        "TransactionCanceledException", ["TransactionConflict", "None"]
+    )
+    writer = FlakyWriter(*[conflict] * 4)
+    monkeypatch.setattr(dynamodb, "get_client", lambda: FakeWriteClient(writer))
+
+    with pytest.raises(ClientError):
+        dynamodb.guarded_put_if_absent(VERSIONED_ITEM, GUARD)
+    assert writer.calls == 4
+
+
+def test_a_guarded_write_raises_a_cancellation_without_a_known_reason(
+    monkeypatch: pytest.MonkeyPatch, no_backoff: None
+) -> None:
+    writer = FlakyWriter(
+        _client_error("TransactionCanceledException", ["None", "ValidationError"])
+    )
+    monkeypatch.setattr(dynamodb, "get_client", lambda: FakeWriteClient(writer))
+
+    with pytest.raises(ClientError):
+        dynamodb.guarded_put_if_absent(VERSIONED_ITEM, GUARD)
+    assert writer.calls == 1
 
 
 def test_query_by_prefix_returns_empty_list(dynamodb_table: DynamoDBClient) -> None:
@@ -394,3 +611,60 @@ def test_query_by_prefix_tolerates_a_page_without_items(
     result = dynamodb.query_by_prefix("USER#1", "EXPENSE#")
 
     assert [item["SK"] for item in result] == ["EXPENSE#1", "EXPENSE#2"]
+
+
+# ── shared client ────────────────────────────────────────────────────────────
+
+
+def test_get_client_reuses_one_client() -> None:
+    assert dynamodb.get_client() is dynamodb.get_client()
+
+
+def test_get_client_builds_a_new_client_after_reset() -> None:
+    first = dynamodb.get_client()
+
+    dynamodb.reset_clients()
+
+    assert dynamodb.get_client() is not first
+
+
+def test_get_client_keeps_a_client_per_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "DYNAMODB_ENDPOINT_URL", None)
+    aws = dynamodb.get_client()
+    monkeypatch.setattr(settings, "DYNAMODB_ENDPOINT_URL", "http://127.0.0.1:8000")
+
+    local = dynamodb.get_client()
+
+    assert local is not aws
+    assert local.meta.endpoint_url == "http://127.0.0.1:8000"
+
+
+def test_simultaneous_first_calls_create_exactly_one_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parallel tool calls must not build clients concurrently, nor end up with two."""
+    threads = 8
+    barrier = threading.Barrier(threads)
+    real_session = boto3.session.Session
+    sessions_created = 0
+    count_lock = threading.Lock()
+
+    def counting_session(*args: Any, **kwargs: Any) -> boto3.session.Session:
+        nonlocal sessions_created
+        with count_lock:
+            sessions_created += 1
+        return real_session(*args, **kwargs)
+
+    monkeypatch.setattr(boto3.session, "Session", counting_session)
+
+    def first_call() -> object:
+        barrier.wait(timeout=10)
+        return dynamodb.get_client()
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        clients = list(pool.map(lambda _: first_call(), range(threads)))
+
+    assert sessions_created == 1
+    assert all(client is clients[0] for client in clients)

@@ -130,6 +130,9 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
           "dynamodb:Query",
           "dynamodb:Scan",
           "dynamodb:TransactWriteItems",
+          # Expense writes check the trip is not ending in the same transaction, and
+          # that check is authorised as its own action, apart from the write.
+          "dynamodb:ConditionCheckItem",
           # The checkpointer batches its reads and deletes rather than issuing one call
           # per item, so DeleteItem alone does not cover clear_thread_history. Without
           # these it fails with AccessDeniedException, and because that failure is

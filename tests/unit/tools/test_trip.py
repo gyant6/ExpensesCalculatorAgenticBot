@@ -14,6 +14,7 @@ from src.bot.export import CSV_FIELDNAMES
 from src.bot.storage import dynamodb
 from src.bot.tools import trip
 from src.bot.tools.fx import FX_URL
+from src.bot.tools.trip_state import TripStatus
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb import DynamoDBClient
@@ -61,6 +62,7 @@ def test_start_trip_records_the_local_start_date_and_zone(
         "SK": "TRIP#ACTIVE",
         "start_date": "2026-09-14",
         "timezone": "America/Los_Angeles",
+        "status": TripStatus.ACTIVE,
     }
     assert tool_output == "New trip started on 2026-09-14 (America/Los_Angeles)."
 
@@ -254,7 +256,88 @@ def test_nothing_is_deleted_when_the_archive_cannot_be_written(
             trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
 
     assert len(dynamodb.query_by_prefix(pk, "EXPENSE#")) == 1
-    assert dynamodb.get_item(pk, "TRIP#ACTIVE") is not None
+    # Reopened, so the trip can take expenses again rather than refusing them.
+    active = dynamodb.get_item(pk, "TRIP#ACTIVE")
+    assert active is not None
+    assert active["status"] == TripStatus.ACTIVE
+
+
+@respx.mock
+def test_a_failed_reopen_still_raises_the_original_error(
+    dynamodb_table: DynamoDBClient, base_expense: dict[str, Any]
+) -> None:
+    respx.get(FX_URL).mock(
+        return_value=Response(200, json={"success": True, "rates": {"JPY": 124.1}})
+    )
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    dynamodb.put_item({"PK": pk, "SK": "TRIP#ACTIVE", "start_date": "2025-12-20"})
+    dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
+    archive_rejected = ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "Item size too large"}},
+        "PutItem",
+    )
+    reopen_failed = ClientError(
+        {"Error": {"Code": "InternalServerError", "Message": "Reopen failed"}},
+        "UpdateItem",
+    )
+
+    with (
+        patch.object(dynamodb, "put_item", side_effect=archive_rejected),
+        patch.object(dynamodb, "update_item", side_effect=reopen_failed),
+        pytest.raises(ClientError, match="Item size too large"),
+    ):
+        trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+
+    active = dynamodb.get_item(pk, "TRIP#ACTIVE")
+    assert active is not None
+    assert active["status"] == TripStatus.ENDING
+    assert len(dynamodb.query_by_prefix(pk, "EXPENSE#")) == 1
+
+
+@respx.mock
+def test_a_trip_left_ending_by_a_crash_ends_normally(
+    dynamodb_table: DynamoDBClient, base_expense: dict[str, Any]
+) -> None:
+    respx.get(FX_URL).mock(
+        return_value=Response(200, json={"success": True, "rates": {"JPY": 124.1}})
+    )
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    dynamodb.put_item(
+        {
+            "PK": pk,
+            "SK": "TRIP#ACTIVE",
+            "start_date": "2025-12-20",
+            "status": TripStatus.ENDING.value,
+        }
+    )
+    dynamodb.put_item({"PK": pk, "SK": "EXPENSE#1", **base_expense})
+
+    tool_output = trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+
+    assert tool_output.startswith(trip.END_TRIP_SUCCESS)
+    assert dynamodb.query_by_prefix(pk, "EXPENSE#") == []
+    assert dynamodb.get_item(pk, "TRIP#ACTIVE") is None
+
+
+def test_end_trip_does_not_recreate_a_trip_ended_meanwhile(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    pk = f"USER#{TELEGRAM_USER_ID}"
+    dynamodb.put_item({"PK": pk, "SK": "TRIP#ACTIVE", "start_date": "2025-12-20"})
+    real_get = dynamodb.get_item
+
+    def read_then_end(
+        item_pk: str, item_sk: str, **kwargs: Any
+    ) -> dict[str, Any] | None:
+        item = real_get(item_pk, item_sk, **kwargs)
+        dynamodb.delete_item(item_pk, item_sk)
+        return item
+
+    with patch.object(dynamodb, "get_item", side_effect=read_then_end):
+        tool_output = trip.end_trip.invoke({"ledger_id": TELEGRAM_USER_ID})
+
+    assert tool_output == trip.NO_ACTIVE_TRIP
+    assert dynamodb.get_item(pk, "TRIP#ACTIVE") is None
 
 
 def test_end_trip_returns_error_when_no_active_trip(

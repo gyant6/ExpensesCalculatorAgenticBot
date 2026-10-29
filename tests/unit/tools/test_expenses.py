@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from src.bot.storage import dynamodb
 from src.bot.tools import expenses
+from src.bot.tools.trip_state import TRIP_ACTIVE_SK, TRIP_ENDING, TripStatus
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb import DynamoDBClient
@@ -427,6 +428,58 @@ def test_delete_is_refused_when_another_message_deleted_meanwhile(
         result = _delete("k7qm", "6.13")
 
     assert CHANGED_MEANWHILE in result
+
+
+# ── writes while the trip is ending ──────────────────────────────────────────
+
+
+def _trip(status: TripStatus) -> None:
+    dynamodb.put_item(
+        {
+            "PK": PK,
+            "SK": TRIP_ACTIVE_SK,
+            "start_date": "2026-09-14",
+            "status": status.value,
+        }
+    )
+
+
+def test_add_is_refused_while_the_trip_is_ending(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _trip(TripStatus.ENDING)
+
+    assert _add() == TRIP_ENDING
+    assert expenses.list_expenses(LEDGER) == []
+
+
+def test_edit_is_refused_while_the_trip_is_ending(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    original = _seed("k7qm")
+    _trip(TripStatus.ENDING)
+
+    assert _edit("k7qm", "6.13", amount="7.00") == TRIP_ENDING
+    assert _get("k7qm") == original
+
+
+def test_delete_is_refused_while_the_trip_is_ending(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    original = _seed("k7qm")
+    _trip(TripStatus.ENDING)
+
+    assert _delete("k7qm", "6.13") == TRIP_ENDING
+    assert _get("k7qm") == original
+
+
+def test_writes_are_allowed_on_an_active_trip(dynamodb_table: DynamoDBClient) -> None:
+    _trip(TripStatus.ACTIVE)
+    _seed("k7qm")
+
+    assert _add().startswith("Expense recorded")
+    assert _edit("k7qm", "6.13", amount="7.00") == "Edit expense successful."
+    assert _delete("k7qm", "7.00") == "Expense deleted."
 
 
 def test_an_expense_from_before_updated_at_can_still_be_edited(

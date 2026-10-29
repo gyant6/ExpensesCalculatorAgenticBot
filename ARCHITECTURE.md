@@ -272,7 +272,7 @@ sequenceDiagram
             end
         end
         Handler->>Graph: Resume with graph.invoke(None, config)
-        Graph->>DB: end_trip reads active trip and expenses
+        Graph->>DB: end_trip marks the trip ENDING, then reads its expenses
         opt Trip has expenses
             Graph->>FX: Fetch rates for tool-result CSV
             FX-->>Graph: Rates, or unavailable
@@ -375,7 +375,7 @@ ledgers; changing it requires a data migration.
 
 | PK | SK | Attributes | Description |
 |---|---|---|---|
-| `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date`, `timezone` | Active trip marker; `timezone` is the trip's IANA zone, absent on trips started before zones existed |
+| `USER#<ledger_id>` | `TRIP#ACTIVE` | `start_date`, `timezone`, `status` | Active trip marker; `timezone` is the trip's IANA zone, absent on trips started before zones existed. `status` is `ACTIVE`, or `ENDING` while `end_trip` runs; absent on older trips, which count as `ACTIVE` |
 | `USER#<ledger_id>` | `EXPENSE#<id>` | see below | Individual expense, keyed by an immutable 4-character id |
 | `USER#<ledger_id>` | `ARCHIVE#<ended_at>` | `start_date`, `ended_at`, `expenses`, `ttl` | An ended trip's expenses, kept for `TRIP_ARCHIVE_TTL_SECONDS` (90 days) |
 | `UPDATE#<update_id>` | `MARKER` | `claimed_at`, `ttl` | A Telegram update already handled; a redelivery finding it is dropped. Expires after `UPDATE_DEDUP_TTL_SECONDS` (one day) |
@@ -421,7 +421,7 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
 
 ### 1. `start_trip`
 - **Input:** `timezone: str` — the IANA zone of where the user is travelling. The model maps the place ("Japan" → `Asia/Tokyo`) and, if the user named none, asks once before calling.
-- **Action:** Returns an error if `zoneinfo` does not recognise the zone. Otherwise writes `TRIP#ACTIVE` with `timezone` and `start_date` — `message_time` as a day in that zone — conditional on no `TRIP#ACTIVE` existing, and returns an error if one does (only one active trip). The check and the write are one operation, so two simultaneous starts cannot both succeed.
+- **Action:** Returns an error if `zoneinfo` does not recognise the zone. Otherwise writes `TRIP#ACTIVE` with `timezone`, `start_date` — `message_time` as a day in that zone — and `status=ACTIVE`, conditional on no `TRIP#ACTIVE` existing, and returns an error if one does (only one active trip). The check and the write are one operation, so two simultaneous starts cannot both succeed.
 - **Returns:** Confirmation with the start date and zone.
 
 ### 1a. `set_trip_timezone`
@@ -431,19 +431,19 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
 
 ### 2. `add_expense`
 - **Input:** `source_message: str`, `summary: str`, `category: str`, `amount: str`, `currency: str`, `date: str | None = None`, `payment_method: str = "Card"`
-- **Action:** Writes an `EXPENSE#<id>` item, where `<id>` is four random characters from an alphabet without look-alikes (`23456789abcdefghjkmnpqrstuvwxyz`). The write is conditional on the key being free, so a collision retries with a fresh id rather than overwriting; five consecutive collisions raise. Records `created_at` and `updated_at` in UTC, and the trip's `timezone`. No FX conversion at write time. When `date` is None, uses `local_date` — today in the trip's zone, the date the model was told.
-- **Returns:** `"Expense recorded with id <id>."` — the model keeps the id for a follow-up edit in the same conversation and never shows it — or a validation error string.
+- **Action:** Writes an `EXPENSE#<id>` item, where `<id>` is four random characters from an alphabet without look-alikes (`23456789abcdefghjkmnpqrstuvwxyz`). The write is conditional on the key being free, so a collision retries with a fresh id rather than overwriting; five consecutive collisions raise. It is made in one transaction with a check that the ledger's trip is not `ENDING` (see `end_trip`); a ledger with no trip passes. Records `created_at` and `updated_at` in UTC, and the trip's `timezone`. No FX conversion at write time. When `date` is None, uses `local_date` — today in the trip's zone, the date the model was told.
+- **Returns:** `"Expense recorded with id <id>."` — the model keeps the id for a follow-up edit in the same conversation and never shows it — a validation error string, or a notice that the trip is ending and nothing was recorded.
 - **Note:** The LLM extracts all structured fields from the user's raw message. If the user does not mention a currency, the LLM defaults `currency` to `"SGD"`. `category` must be one of the values in `CATEGORIES`; `amount` must parse as a positive `Decimal`; `date` must be `YYYY-MM-DD`.
 
 ### 3. `edit_expense`
 - **Input:** `expense_id: str`, `expected_amount: str`, `edit_message: str`, and any subset of `summary`, `category`, `amount`, `currency`, `date`, `payment_method`
-- **Action:** Fetches `EXPENSE#<expense_id>` with one `get_item`, and refuses unless its current amount equals `expected_amount` (compared as `Decimal`). Then updates the supplied fields and `updated_at` in place, appending `edit_message` to `source_message`. The update is conditional on the expense still having the `amount` and `updated_at` it was read with, so an edit or delete by another message in between is not overwritten. A date edit is an ordinary update — the key is the id, so nothing moves. `summary` changes only when passed, which the model does only when the user asks to rename.
-- **Returns:** `"Edit expense successful."`, or an error string if nothing was to change, the id is unknown, the amount did not match (naming what the id actually holds), a value failed validation, or another message changed or deleted the expense in between.
+- **Action:** Fetches `EXPENSE#<expense_id>` with one `get_item`, and refuses unless its current amount equals `expected_amount` (compared as `Decimal`). Then updates the supplied fields and `updated_at` in place, appending `edit_message` to `source_message`. The update is conditional on the expense still having the `amount` and `updated_at` it was read with, so an edit or delete by another message in between is not overwritten, and is made in one transaction with the same not-`ENDING` trip check as `add_expense`. A date edit is an ordinary update — the key is the id, so nothing moves. `summary` changes only when passed, which the model does only when the user asks to rename.
+- **Returns:** `"Edit expense successful."`, or an error string if nothing was to change, the id is unknown, the amount did not match (naming what the id actually holds), a value failed validation, another message changed or deleted the expense in between, or the trip is ending.
 
 ### 4. `delete_expense`
 - **Input:** `expense_id: str`, `expected_amount: str`
-- **Action:** The same fetch, amount check and conditional write as `edit_expense`, then deletes the item.
-- **Returns:** `"Expense deleted."`, or an error string if the id is unknown, the amount did not match, or another message changed or deleted the expense in between.
+- **Action:** The same fetch, amount check, conditional write and trip check as `edit_expense`, then deletes the item.
+- **Returns:** `"Expense deleted."`, or an error string if the id is unknown, the amount did not match, another message changed or deleted the expense in between, or the trip is ending.
 
 ### 5. `get_all_expenses`
 - **Input:** _(none beyond ledger_id)_
@@ -455,11 +455,14 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
 - **Human-in-the-loop:** The graph is compiled with `interrupt_before=["end_trip_node"]`. This guarantees `end_trip` never executes on the same turn the LLM first decides to call it. The graph pauses, saves state to the checkpointer, and returns control to `handle_message`, which sends a Yes/No inline keyboard to the user.
 - **Action (once the node runs, after confirmation):**
   1. Returns an error and deletes nothing if no `TRIP#ACTIVE` item exists.
-  2. Queries all `EXPENSE#*` items for the ledger.
-  3. Calls `get_sgd_exchange_rates()`. On failure it continues without rates rather than blocking the trip from ending.
-  4. Builds the CSV via `generate_csv(expenses, fx_rates)` — before any deletion, so a failed export leaves the trip intact rather than destroying records with no copy of them.
-  5. Writes the `ARCHIVE#<ended_at>` item holding every expense, with a `ttl` 90 days out. Skipped for a trip with no expenses. If this write fails, the tool fails and nothing is deleted.
-  6. Deletes every `EXPENSE#*` item and the `TRIP#ACTIVE` item.
+  2. Sets `TRIP#ACTIVE.status` to `ENDING`, conditional on the trip still being the one just read. From here every expense add, edit and delete is refused, because each checks the status in the same transaction as its write.
+  3. Queries all `EXPENSE#*` items for the ledger with a strongly consistent read, which includes every write acknowledged before it. With step 2, every expense is either in this read — and so archived and deleted — or was refused; none can land in between and be left for the next trip.
+  4. Calls `get_sgd_exchange_rates()`. On failure it continues without rates rather than blocking the trip from ending.
+  5. Builds the CSV via `generate_csv(expenses, fx_rates)` — before any deletion, so a failed export leaves the trip intact rather than destroying records with no copy of them.
+  6. Writes the `ARCHIVE#<ended_at>` item holding every expense, with a `ttl` 90 days out. Skipped for a trip with no expenses. If this write fails, the tool fails and nothing is deleted.
+  7. Deletes every `EXPENSE#*` item and the `TRIP#ACTIVE` item.
+
+  If steps 3–6 fail, the status is set back to `ACTIVE` before the error propagates. A trip left `ENDING` — by a crash, or a failed reset — refuses expense writes until `end_trip` runs again, which ends it normally.
 - **Returns (to graph):** A confirmation line followed by the CSV of all expenses, including the `amount_sgd` column. The caller uses this CSV for the delivered totals. If rates were unavailable, foreign-currency rows have a blank `amount_sgd` cell.
 - **On confirm (`handle_callback`):**
   1. Renders charts and a fallback CSV from the live expense data before the tool deletes it.
@@ -618,8 +621,9 @@ paid inference requests.
 - `test_dynamodb_local_concurrency.py` releases two tool calls on separate threads at
   once, as two group members' simultaneous messages would run, over several fresh
   ledgers. It checks that exactly one of two trip starts, two edits of one expense, or an
-  edit and a delete takes effect. An expected-failure test records that an expense added
-  while `end_trip` runs is left behind for the next trip.
+  edit and a delete takes effect. It also checks that an add or edit landing while
+  `end_trip` runs is refused, and that an add racing `end_trip` is always archived or
+  kept, never lost.
 
 With DynamoDB Local running, opt in from Command Prompt with
 `set "RUN_DYNAMODB_LOCAL_TESTS=1" && uv run pytest tests/integration -q`.
@@ -831,10 +835,6 @@ and update deduplication; see [0006](docs/decisions/0006-expenses-addressed-by-i
 
 - [ ] Assess an SQS FIFO queue for turns exceeding the gateway timeout and to serialize
   concurrent turns within each chat.
-- [ ] Keep an expense added while `end_trip` runs out of the next trip. `end_trip` lists
-  the expenses once and deletes only those; the expected-failure integration test passes
-  once this is fixed. The pending-confirmation guard already declines new messages, so
-  only a turn started before the confirmation was shown can reach this.
 - [ ] Add author attribution to expenses, expense lists and CSV exports.
 - [ ] Evaluate relative-date interpretation with more capable models, retaining known
   date failures in the evaluation suite. Custom date parsing and calculation tools are

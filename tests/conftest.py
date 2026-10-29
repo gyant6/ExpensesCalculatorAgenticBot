@@ -8,9 +8,22 @@ import pytest
 from moto import mock_aws
 
 from src.bot.config import settings
+from src.bot.storage import dynamodb
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb import DynamoDBClient
+
+
+@pytest.fixture(autouse=True)
+def fresh_dynamodb_client() -> Generator[None, None, None]:
+    """Give every test its own shared DynamoDB client.
+
+    The application reuses one client, so without this a client built under one test's
+    mock or credentials would serve the next test.
+    """
+    dynamodb.reset_clients()
+    yield
+    dynamodb.reset_clients()
 
 
 @pytest.fixture(scope="function")

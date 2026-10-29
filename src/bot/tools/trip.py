@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 import httpx
+from botocore.exceptions import ClientError
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
 from pydantic import ValidationError
@@ -15,6 +16,7 @@ from src.bot.storage import dynamodb
 from src.bot.timezones import describe_date, is_valid_timezone, local_date
 from src.bot.tools.expenses import list_expenses
 from src.bot.tools.fx import get_sgd_exchange_rates
+from src.bot.tools.trip_state import STATUS_ATTRIBUTE, TRIP_ACTIVE_SK, TripStatus
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +82,10 @@ def start_trip(
     created = dynamodb.put_item_if_absent(
         {
             "PK": f"USER#{ledger_id}",
-            "SK": "TRIP#ACTIVE",
+            "SK": TRIP_ACTIVE_SK,
             "start_date": start_date,
             "timezone": timezone,
+            STATUS_ATTRIBUTE: TripStatus.ACTIVE.value,
         }
     )
     if not created:
@@ -116,10 +119,10 @@ def set_trip_timezone(
     if not is_valid_timezone(timezone):
         return _invalid_timezone(timezone)
     pk = f"USER#{ledger_id}"
-    if dynamodb.get_item(pk, "TRIP#ACTIVE") is None:
+    if dynamodb.get_item(pk, TRIP_ACTIVE_SK) is None:
         return "There is no active trip. Start a trip first."
 
-    dynamodb.update_item(pk, "TRIP#ACTIVE", {"timezone": timezone})
+    dynamodb.update_item(pk, TRIP_ACTIVE_SK, {"timezone": timezone})
     today = describe_date(local_date(message_time, timezone))
     return f"Time zone set to {timezone}. Today there is {today}."
 
@@ -158,6 +161,29 @@ def _archive_trip(pk: str, start_date: str, expenses: list[dict[str, Any]]) -> N
     )
 
 
+def _reopen_trip(pk: str, ledger_id: str) -> None:
+    """Mark a trip ACTIVE again after end_trip failed before deleting anything.
+
+    Called while another exception is propagating, so a failure here is logged rather
+    than raised in its place. The trip then stays ENDING, refusing expense writes, until
+    end_trip is retried and finishes it.
+
+    Args:
+        pk: Partition key of the ledger whose trip failed to end.
+        ledger_id: The same ledger, for the log line.
+    """
+    try:
+        dynamodb.update_item(
+            pk, TRIP_ACTIVE_SK, {STATUS_ATTRIBUTE: TripStatus.ACTIVE.value}
+        )
+    except ClientError:
+        logger.exception(
+            "Could not reopen the trip for ledger %s after end_trip failed; it stays "
+            "ENDING until end_trip is retried",
+            ledger_id,
+        )
+
+
 @tool
 def end_trip(
     ledger_id: Annotated[str, InjectedState("ledger_id")],
@@ -168,9 +194,15 @@ def end_trip(
     present the summary, then call this tool. The user will be shown a confirmation
     prompt by the application before this tool actually executes.
 
+    The trip is first marked ENDING, which refuses every expense write from then on, and
+    the expenses are then read with a strongly consistent query. Together these ensure
+    that every expense is either in that read, and so archived and deleted, or was
+    refused — none can be left behind to join the next trip.
+
     The CSV is built and the expenses archived before anything is deleted, so a failure
-    at either step leaves the trip intact rather than destroying records with no copy of
-    them. The archive expires after TRIP_ARCHIVE_TTL_SECONDS.
+    at either step leaves the trip intact, marked ACTIVE again, rather than destroying
+    records with no copy of them. The archive expires after TRIP_ARCHIVE_TTL_SECONDS.
+    A trip already marked ENDING, by a run that crashed, is ended normally.
 
     Args:
         ledger_id: The Telegram user ID of the user ending the trip.
@@ -186,34 +218,52 @@ def end_trip(
         botocore.exceptions.ClientError: If a DynamoDB request fails.
     """
     pk = f"USER#{ledger_id}"
-    active_trip = dynamodb.get_item(pk, "TRIP#ACTIVE")
+    active_trip = dynamodb.get_item(pk, TRIP_ACTIVE_SK, consistent_read=True)
     if active_trip is None:
         return NO_ACTIVE_TRIP
 
-    # Sorted by date, so the CSV the summary is written from reads chronologically.
-    expenses = list_expenses(ledger_id)
+    # Close the trip to expense writes before reading the expenses. Conditional on the
+    # trip being the one just read, so a trip ended meanwhile by another confirmation
+    # is not recreated as a bare marker.
+    marked = dynamodb.update_item_if_unchanged(
+        pk,
+        TRIP_ACTIVE_SK,
+        {STATUS_ATTRIBUTE: TripStatus.ENDING.value},
+        expected={"start_date": active_trip["start_date"]},
+    )
+    if not marked:
+        return NO_ACTIVE_TRIP
 
-    fx_rates: dict[str, float] = {}
-    rates_unavailable = False
-    if expenses:
-        try:
-            fx_rates = get_sgd_exchange_rates()
-        except (httpx.HTTPError, RuntimeError, ValidationError):
-            logger.exception(
-                "FX rate fetch failed for user %s; ending trip without SGD conversion",
-                ledger_id,
-            )
-            rates_unavailable = True
+    try:
+        # Sorted by date, so the CSV the summary is written from reads chronologically.
+        expenses = list_expenses(ledger_id, consistent_read=True)
 
-    # Export and archive before deleting. If either raises, the tool fails and nothing is
-    # removed. A trip with no expenses has nothing worth keeping, so it is not archived.
-    csv_text = generate_csv(expenses, fx_rates).decode("utf-8")
-    if expenses:
-        _archive_trip(pk, active_trip["start_date"], expenses)
+        fx_rates: dict[str, float] = {}
+        rates_unavailable = False
+        if expenses:
+            try:
+                fx_rates = get_sgd_exchange_rates()
+            except (httpx.HTTPError, RuntimeError, ValidationError):
+                logger.exception(
+                    "FX rate fetch failed for user %s; ending trip without SGD "
+                    "conversion",
+                    ledger_id,
+                )
+                rates_unavailable = True
+
+        # Export and archive before deleting. If either raises, the tool fails and
+        # nothing is removed. A trip with no expenses has nothing worth keeping, so it
+        # is not archived.
+        csv_text = generate_csv(expenses, fx_rates).decode("utf-8")
+        if expenses:
+            _archive_trip(pk, active_trip["start_date"], expenses)
+    except Exception:
+        _reopen_trip(pk, ledger_id)
+        raise
 
     for expense in expenses:
         dynamodb.delete_item(pk, expense["SK"])
-    dynamodb.delete_item(pk, "TRIP#ACTIVE")
+    dynamodb.delete_item(pk, TRIP_ACTIVE_SK)
 
     if rates_unavailable:
         return f"{END_TRIP_SUCCESS}\n\n{FX_UNAVAILABLE_NOTICE}\n\n{csv_text}"
