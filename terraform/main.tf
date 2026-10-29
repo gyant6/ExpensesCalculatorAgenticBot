@@ -106,7 +106,6 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
         Sid    = "CloudWatchLogs"
         Effect = "Allow"
         Action = [
-          "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
@@ -204,7 +203,6 @@ resource "aws_iam_role_policy" "chart_lambda_exec_policy" {
       Sid    = "CloudWatchLogs"
       Effect = "Allow"
       Action = [
-        "logs:CreateLogGroup",
         "logs:CreateLogStream",
         "logs:PutLogEvents"
       ]
