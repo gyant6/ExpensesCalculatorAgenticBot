@@ -46,6 +46,38 @@ def get_client() -> DynamoDBClient:
     )
 
 
+def _expected_state_condition(
+    expected: dict[str, Any],
+) -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Build a ConditionExpression requiring an item to still hold the given values.
+
+    Args:
+        expected: Attribute names mapped to the value each must currently have. None
+            means the attribute must be absent, for items written before it existed.
+
+    Returns:
+        The condition expression, its attribute name placeholders, and its serialised
+        value placeholders. Value placeholders are prefixed `:expected_` so they cannot
+        collide with those of an update expression.
+
+    Raises:
+        ValueError: If expected is empty, which would make the condition meaningless.
+    """
+    if not expected:
+        raise ValueError("expected must not be empty")
+
+    clauses: list[str] = []
+    values: dict[str, Any] = {}
+    for name, value in expected.items():
+        if value is None:
+            clauses.append(f"attribute_not_exists(#{name})")
+        else:
+            clauses.append(f"#{name} = :expected_{name}")
+            values[f":expected_{name}"] = serializer.serialize(value)
+    names = {f"#{name}": name for name in expected}
+    return " AND ".join(clauses), names, values
+
+
 def update_item(pk: str, sk: str, fields: dict[str, Any]) -> None:
     """Update specific attributes of an existing DynamoDB item without overwriting the whole item.
 
@@ -80,6 +112,101 @@ def update_item(pk: str, sk: str, fields: dict[str, Any]) -> None:
         ExpressionAttributeValues=exp_attr_values,
         ConditionExpression="attribute_exists(PK)",
     )
+
+
+def update_item_if_unchanged(
+    pk: str, sk: str, fields: dict[str, Any], expected: dict[str, Any]
+) -> bool:
+    """Update attributes of an item only if it still holds the values it was read with.
+
+    This is optimistic locking: the caller reads the item, decides on a change, and
+    passes the values it read as `expected`. DynamoDB checks them and applies the update
+    as one atomic operation, so if another request changed or deleted the item in
+    between, this update is refused instead of overwriting that change.
+
+    Args:
+        pk: Partition key value (e.g. 'USER#123456789').
+        sk: Sort key value (e.g. 'EXPENSE#k7qm').
+        fields: Attribute names mapped to their new Python-native values. Must not be
+            empty.
+        expected: Attribute names mapped to the value each must currently have; None
+            means the attribute must be absent. Must not be empty.
+
+    Returns:
+        True if the update was applied, False if the item no longer matched `expected`
+        or no longer exists, in which case nothing was changed.
+
+    Raises:
+        ValueError: If fields or expected is empty.
+        botocore.exceptions.ClientError: If the request fails for any reason other than
+            the condition not holding.
+    """
+    if not fields:
+        raise ValueError("fields must not be empty")
+    condition, condition_names, condition_values = _expected_state_condition(expected)
+
+    update_expression = "SET " + ", ".join(f"#{name} = :{name}" for name in fields)
+    try:
+        get_client().update_item(
+            TableName=settings.DYNAMODB_TABLE_NAME,
+            Key={"PK": {"S": pk}, "SK": {"S": sk}},
+            UpdateExpression=update_expression,
+            ConditionExpression=f"attribute_exists(PK) AND {condition}",
+            ExpressionAttributeNames={
+                **{f"#{name}": name for name in fields},
+                **condition_names,
+            },
+            ExpressionAttributeValues={
+                **{f":{name}": serializer.serialize(v) for name, v in fields.items()},
+                **condition_values,
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == _CONDITION_FAILED:
+            return False
+        raise
+    return True
+
+
+def delete_item_if_unchanged(pk: str, sk: str, expected: dict[str, Any]) -> bool:
+    """Delete an item only if it still holds the values it was read with.
+
+    The delete counterpart of update_item_if_unchanged: a delete decided on from a read
+    is refused if another request changed or removed the item since.
+
+    Args:
+        pk: Partition key value (e.g. 'USER#123456789').
+        sk: Sort key value (e.g. 'EXPENSE#k7qm').
+        expected: Attribute names mapped to the value each must currently have; None
+            means the attribute must be absent. Must not be empty.
+
+    Returns:
+        True if the item was deleted, False if it no longer matched `expected` or no
+        longer exists, in which case nothing was deleted.
+
+    Raises:
+        ValueError: If expected is empty.
+        botocore.exceptions.ClientError: If the request fails for any reason other than
+            the condition not holding.
+    """
+    condition, condition_names, condition_values = _expected_state_condition(expected)
+    request: dict[str, Any] = {
+        "TableName": settings.DYNAMODB_TABLE_NAME,
+        "Key": {"PK": {"S": pk}, "SK": {"S": sk}},
+        "ConditionExpression": f"attribute_exists(PK) AND {condition}",
+        "ExpressionAttributeNames": condition_names,
+    }
+    # DynamoDB rejects an empty ExpressionAttributeValues, which an all-absent
+    # expectation would produce.
+    if condition_values:
+        request["ExpressionAttributeValues"] = condition_values
+    try:
+        get_client().delete_item(**request)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == _CONDITION_FAILED:
+            return False
+        raise
+    return True
 
 
 def put_item(item: dict[str, Any]) -> None:
@@ -217,9 +344,8 @@ def query_by_prefix(pk: str, prefix: str) -> list[dict[str, Any]]:
     A single DynamoDB query returns at most 1 MB of data, signalling that more remains by
     returning a LastEvaluatedKey. This follows that key to exhaustion via the boto3
     paginator, so callers always receive the whole partition instead of a silently
-    truncated first page: `end_trip` deletes every expense it is meant to, and the 1-based
-    positions that `edit_expense` and `delete_expense` accept always refer to the full
-    list.
+    truncated first page: `end_trip` archives and deletes every expense, and
+    `get_all_expenses` lists every one.
 
     Args:
         pk: Partition key value (e.g. 'USER#123456789').

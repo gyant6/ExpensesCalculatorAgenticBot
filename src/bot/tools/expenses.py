@@ -142,6 +142,32 @@ def _load_for_change(
     return item, None
 
 
+def _as_read(item: dict[str, Any]) -> dict[str, Any]:
+    """The values a conditional write requires an expense to still hold.
+
+    updated_at changes on every write, so a match means nothing has touched the expense
+    since it was read; amount is the field the caller's check was made against. An item
+    from before updated_at existed expects it absent, which equally fails once anything
+    writes it.
+
+    Args:
+        item: The expense as read by _load_for_change.
+
+    Returns:
+        Attribute names mapped to the values read, for dynamodb's *_if_unchanged calls.
+    """
+    return {"amount": item["amount"], "updated_at": item.get("updated_at")}
+
+
+def _changed_meanwhile(expense_id: str) -> str:
+    """Error for an edit or delete refused because the expense changed after its read."""
+    return (
+        f"Expense {expense_id} was changed or deleted by another message while this "
+        "one was being handled. Nothing was changed: call get_all_expenses and retry "
+        "with the current id and amount if the change is still wanted."
+    )
+
+
 @tool
 def add_expense(
     ledger_id: Annotated[str, InjectedState("ledger_id")],
@@ -270,11 +296,11 @@ def edit_expense(
 
     Returns:
         A confirmation string on success, or an error string if nothing was to change,
-        the id is unknown, the amount did not match, or a field value failed validation.
+        the id is unknown, the amount did not match, a field value failed validation,
+        or another message changed or deleted the expense while this one was handled.
 
     Raises:
-        botocore.exceptions.ClientError: If the DynamoDB request fails, including when
-            the expense is deleted between being read and being updated.
+        botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
     changes: dict[str, Any] = {}
     if summary:
@@ -306,8 +332,11 @@ def edit_expense(
         return error or "The expense could not be loaded."
 
     # A date edit is an ordinary update: the key is the id, not the date, so nothing
-    # moves and no other expense's position changes.
-    dynamodb.update_item(
+    # moves and no other expense's position changes. The update is conditional on the
+    # expense being as it was read: the amount check above and the appended
+    # source_message both came from that read, and a concurrent edit would otherwise be
+    # silently overwritten.
+    updated = dynamodb.update_item_if_unchanged(
         item["PK"],
         item["SK"],
         {
@@ -315,7 +344,10 @@ def edit_expense(
             "source_message": f"{item['source_message']} | {edit_message}",
             "updated_at": _now_utc(),
         },
+        expected=_as_read(item),
     )
+    if not updated:
+        return _changed_meanwhile(expense_id)
     return "Edit expense successful."
 
 
@@ -340,8 +372,9 @@ def delete_expense(
             without a currency code.
 
     Returns:
-        A confirmation string on success, or an error string if the id is unknown or the
-        amount did not match.
+        A confirmation string on success, or an error string if the id is unknown, the
+        amount did not match, or another message changed or deleted the expense while
+        this one was handled.
 
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
@@ -350,7 +383,13 @@ def delete_expense(
     if item is None:
         return error or "The expense could not be loaded."
 
-    dynamodb.delete_item(item["PK"], item["SK"])
+    # Conditional for the same reason as edit_expense: the amount check came from the
+    # read, so an edit landing in between must not be deleted unseen.
+    deleted = dynamodb.delete_item_if_unchanged(
+        item["PK"], item["SK"], expected=_as_read(item)
+    )
+    if not deleted:
+        return _changed_meanwhile(expense_id)
     return "Expense deleted."
 
 

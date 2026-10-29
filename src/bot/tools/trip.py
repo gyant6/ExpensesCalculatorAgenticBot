@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 ARCHIVE_SK_PREFIX = "ARCHIVE#"
 
 END_TRIP_SUCCESS = "Trip successfully ended."
+ALREADY_ACTIVE = "There is already an active trip."
 NO_ACTIVE_TRIP = (
     "There are no active trips to be ended. Start a new trip and add expenses first."
 )
@@ -69,13 +70,14 @@ def start_trip(
     Raises:
         botocore.exceptions.ClientError: If the DynamoDB request fails.
     """
-    if dynamodb.get_item(f"USER#{ledger_id}", "TRIP#ACTIVE"):
-        return "There is already an active trip."
     if not is_valid_timezone(timezone):
         return _invalid_timezone(timezone)
 
     start_date = local_date(message_time, timezone)
-    dynamodb.put_item(
+    # Checking for an active trip and creating one are a single conditional write, so
+    # two members starting a trip at the same moment cannot both succeed, with the
+    # second silently replacing the first trip's date and time zone.
+    created = dynamodb.put_item_if_absent(
         {
             "PK": f"USER#{ledger_id}",
             "SK": "TRIP#ACTIVE",
@@ -83,6 +85,8 @@ def start_trip(
             "timezone": timezone,
         }
     )
+    if not created:
+        return ALREADY_ACTIVE
     return f"New trip started on {start_date} ({timezone})."
 
 

@@ -4,22 +4,15 @@ from __future__ import annotations
 
 import csv
 import io
-import os
-from collections.abc import Callable, Generator
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import uuid4
 
-import boto3
 import pytest
-from botocore.config import Config
-from botocore.exceptions import EndpointConnectionError
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from mypy_boto3_dynamodb import DynamoDBClient
 
 from src.bot.agent.graph import build_graph, clear_thread_history, thread_id_for
-from src.bot.config import settings
 from src.bot.conversation import (
     awaiting_confirmation,
     config_for,
@@ -30,11 +23,9 @@ from src.bot.conversation import (
 from src.bot.storage import dynamodb
 from src.bot.tools import trip
 from src.bot.tools.expenses import list_expenses
+from tests.integration.conftest import requires_dynamodb_local
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_DYNAMODB_LOCAL_TESTS") != "1",
-    reason="Set RUN_DYNAMODB_LOCAL_TESTS=1 to run against DynamoDB Local",
-)
+pytestmark = requires_dynamodb_local
 
 MESSAGE_TIME = "2026-10-25T15:30:00+00:00"  # 26 October in Tokyo.
 Reply = AIMessage | Callable[[list[BaseMessage]], AIMessage]
@@ -69,71 +60,6 @@ def expense_id_from_listing(messages: list[BaseMessage], summary: str) -> str:
         if fields[2] == summary:
             return fields[1]
     raise AssertionError(f"Expense {summary!r} missing from listing")
-
-
-@pytest.fixture
-def local_table(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    """Create and later remove only this test's uniquely named local table."""
-    endpoint = os.environ.get("DYNAMODB_LOCAL_TEST_ENDPOINT", "http://127.0.0.1:8000")
-    parsed = urlsplit(endpoint)
-    if (
-        parsed.scheme != "http"
-        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        pytest.fail("DYNAMODB_LOCAL_TEST_ENDPOINT must be a local HTTP address")
-
-    # The graph creates its own boto3 clients, so its entire credential chain must be
-    # pinned to dummy values before construction. No AWS account is needed.
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "local")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "local")
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
-    monkeypatch.setattr(settings, "AWS_REGION", "ap-southeast-1")
-    monkeypatch.setattr(settings, "DYNAMODB_ENDPOINT_URL", endpoint)
-    table_name = f"ExpensesBotIntegration-{uuid4().hex}"
-    monkeypatch.setattr(settings, "DYNAMODB_TABLE_NAME", table_name)
-    client: DynamoDBClient = boto3.client(
-        "dynamodb",
-        endpoint_url=endpoint,
-        region_name=settings.AWS_REGION,
-        aws_access_key_id="local",
-        aws_secret_access_key="local",
-        config=Config(
-            connect_timeout=2, read_timeout=2, retries={"total_max_attempts": 1}
-        ),
-    )
-    try:
-        client.list_tables(Limit=1)
-    except EndpointConnectionError as exc:
-        pytest.fail(
-            f"DynamoDB Local is unavailable at {endpoint}; start docker compose: {exc}"
-        )
-
-    created = False
-    try:
-        client.create_table(
-            TableName=table_name,
-            KeySchema=[
-                {"AttributeName": "PK", "KeyType": "HASH"},
-                {"AttributeName": "SK", "KeyType": "RANGE"},
-            ],
-            AttributeDefinitions=[
-                {"AttributeName": "PK", "AttributeType": "S"},
-                {"AttributeName": "SK", "AttributeType": "S"},
-            ],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        created = True
-        client.get_waiter("table_exists").wait(TableName=table_name)
-        yield
-    finally:
-        if created:
-            client.delete_table(TableName=table_name)
 
 
 def test_artificial_trip_lifecycle(

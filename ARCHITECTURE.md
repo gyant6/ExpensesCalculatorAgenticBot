@@ -421,7 +421,7 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
 
 ### 1. `start_trip`
 - **Input:** `timezone: str` — the IANA zone of where the user is travelling. The model maps the place ("Japan" → `Asia/Tokyo`) and, if the user named none, asks once before calling.
-- **Action:** Returns an error if `TRIP#ACTIVE` exists (only one active trip) or `zoneinfo` does not recognise the zone. Otherwise writes `TRIP#ACTIVE` with `timezone` and `start_date` — `message_time` as a day in that zone.
+- **Action:** Returns an error if `zoneinfo` does not recognise the zone. Otherwise writes `TRIP#ACTIVE` with `timezone` and `start_date` — `message_time` as a day in that zone — conditional on no `TRIP#ACTIVE` existing, and returns an error if one does (only one active trip). The check and the write are one operation, so two simultaneous starts cannot both succeed.
 - **Returns:** Confirmation with the start date and zone.
 
 ### 1a. `set_trip_timezone`
@@ -437,13 +437,13 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
 
 ### 3. `edit_expense`
 - **Input:** `expense_id: str`, `expected_amount: str`, `edit_message: str`, and any subset of `summary`, `category`, `amount`, `currency`, `date`, `payment_method`
-- **Action:** Fetches `EXPENSE#<expense_id>` with one `get_item`, and refuses unless its current amount equals `expected_amount` (compared as `Decimal`). Then updates the supplied fields and `updated_at` in place, appending `edit_message` to `source_message`. A date edit is an ordinary update — the key is the id, so nothing moves. `summary` changes only when passed, which the model does only when the user asks to rename.
-- **Returns:** `"Edit expense successful."`, or an error string if nothing was to change, the id is unknown, the amount did not match (naming what the id actually holds), or a value failed validation.
+- **Action:** Fetches `EXPENSE#<expense_id>` with one `get_item`, and refuses unless its current amount equals `expected_amount` (compared as `Decimal`). Then updates the supplied fields and `updated_at` in place, appending `edit_message` to `source_message`. The update is conditional on the expense still having the `amount` and `updated_at` it was read with, so an edit or delete by another message in between is not overwritten. A date edit is an ordinary update — the key is the id, so nothing moves. `summary` changes only when passed, which the model does only when the user asks to rename.
+- **Returns:** `"Edit expense successful."`, or an error string if nothing was to change, the id is unknown, the amount did not match (naming what the id actually holds), a value failed validation, or another message changed or deleted the expense in between.
 
 ### 4. `delete_expense`
 - **Input:** `expense_id: str`, `expected_amount: str`
-- **Action:** The same fetch and amount check as `edit_expense`, then deletes the item.
-- **Returns:** `"Expense deleted."`, or an error string if the id is unknown or the amount did not match.
+- **Action:** The same fetch, amount check and conditional write as `edit_expense`, then deletes the item.
+- **Returns:** `"Expense deleted."`, or an error string if the id is unknown, the amount did not match, or another message changed or deleted the expense in between.
 
 ### 5. `get_all_expenses`
 - **Input:** _(none beyond ledger_id)_
@@ -609,13 +609,21 @@ Detailed cases are maintained in `tests/unit/`.
 
 #### Layer 2 — Integration Tests
 
-`tests/integration/test_dynamodb_local_trip.py` runs an artificial trip through the
-shared conversation flow and a uniquely named DynamoDB Local table. It checks
-add/edit/delete/list, the confirmation pause, CSV totals, archive and cleanup using a
-scripted model and fixed exchange rates; it makes no paid inference requests. With
-DynamoDB Local running, opt in from Command Prompt with
-`set "RUN_DYNAMODB_LOCAL_TESTS=1" && uv run pytest tests/integration/test_dynamodb_local_trip.py -q`.
-Pagination and concurrent-write coverage remain planned.
+Each test creates and removes its own uniquely named DynamoDB Local table and makes no
+paid inference requests.
+
+- `test_dynamodb_local_trip.py` runs an artificial trip through the shared conversation
+  flow with a scripted model and fixed exchange rates. It checks add/edit/delete/list,
+  the confirmation pause, CSV totals, archive and cleanup.
+- `test_dynamodb_local_concurrency.py` releases two tool calls on separate threads at
+  once, as two group members' simultaneous messages would run, over several fresh
+  ledgers. It checks that exactly one of two trip starts, two edits of one expense, or an
+  edit and a delete takes effect. An expected-failure test records that an expense added
+  while `end_trip` runs is left behind for the next trip.
+
+With DynamoDB Local running, opt in from Command Prompt with
+`set "RUN_DYNAMODB_LOCAL_TESTS=1" && uv run pytest tests/integration -q`.
+Pagination coverage remains planned.
 
 #### Layer 2b — Manual end-to-end run via Telegram
 
@@ -823,6 +831,10 @@ and update deduplication; see [0006](docs/decisions/0006-expenses-addressed-by-i
 
 - [ ] Assess an SQS FIFO queue for turns exceeding the gateway timeout and to serialize
   concurrent turns within each chat.
+- [ ] Keep an expense added while `end_trip` runs out of the next trip. `end_trip` lists
+  the expenses once and deletes only those; the expected-failure integration test passes
+  once this is fixed. The pending-confirmation guard already declines new messages, so
+  only a turn started before the confirmation was shown can reach this.
 - [ ] Add author attribution to expenses, expense lists and CSV exports.
 - [ ] Evaluate relative-date interpretation with more capable models, retaining known
   date failures in the evaluation suite. Custom date parsing and calculation tools are

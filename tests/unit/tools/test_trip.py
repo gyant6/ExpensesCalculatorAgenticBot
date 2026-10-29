@@ -75,15 +75,15 @@ def test_start_trip_rejects_an_unknown_time_zone(
 def test_start_trip_returns_error_when_trip_already_active(
     dynamodb_table: DynamoDBClient,
 ) -> None:
-    dynamodb.put_item(
-        {
-            "PK": f"USER#{TELEGRAM_USER_ID}",
-            "SK": "TRIP#ACTIVE",
-            "start_date": "2020-12-30",
-        }
-    )
+    existing = {
+        "PK": f"USER#{TELEGRAM_USER_ID}",
+        "SK": "TRIP#ACTIVE",
+        "start_date": "2020-12-30",
+    }
+    dynamodb.put_item(existing)
 
-    assert _start("Asia/Tokyo") == "There is already an active trip."
+    assert _start("Asia/Tokyo") == trip.ALREADY_ACTIVE
+    assert dynamodb.get_item(f"USER#{TELEGRAM_USER_ID}", "TRIP#ACTIVE") == existing
 
 
 def test_set_trip_timezone_moves_the_active_trip(

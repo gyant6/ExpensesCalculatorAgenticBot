@@ -9,6 +9,7 @@ target.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -347,6 +348,99 @@ def test_delete_rejects_an_amount_with_currency(
     with pytest.raises(ValidationError, match="expected_amount"):
         _delete("k7qm", "5500 KRW")
     assert _get("k7qm") == original
+
+
+# ── changes made by another message between read and write ──────────────────
+
+LATER = "2026-09-15T03:00:00.000000+00:00"
+CHANGED_MEANWHILE = "was changed or deleted by another message"
+
+
+def _after_read(change: Callable[[str, str], None]) -> Any:
+    """Patch the tools' read so `change` runs on the item right after it is read.
+
+    This reproduces, deterministically, another message's write landing between an
+    edit or delete reading the expense and writing it.
+    """
+    real_get = dynamodb.get_item
+
+    def read_then_change(pk: str, sk: str, **kwargs: Any) -> dict[str, Any] | None:
+        item = real_get(pk, sk, **kwargs)
+        change(pk, sk)
+        return item
+
+    return patch.object(dynamodb, "get_item", side_effect=read_then_change)
+
+
+def _pay_by_cash(pk: str, sk: str) -> None:
+    dynamodb.update_item(pk, sk, {"payment_method": "Cash", "updated_at": LATER})
+
+
+def test_edit_is_refused_when_another_message_edited_meanwhile(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _seed("k7qm")
+
+    with _after_read(_pay_by_cash):
+        result = _edit("k7qm", "6.13", amount="7.00")
+
+    assert CHANGED_MEANWHILE in result
+    item = _get("k7qm")
+    assert item is not None
+    assert item["amount"] == Decimal("6.13")
+    assert item["payment_method"] == "Cash"
+    assert item["source_message"] == "Coffee message"
+
+
+def test_edit_is_refused_when_another_message_deleted_meanwhile(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _seed("k7qm")
+
+    with _after_read(dynamodb.delete_item):
+        result = _edit("k7qm", "6.13", amount="7.00")
+
+    assert CHANGED_MEANWHILE in result
+    assert _get("k7qm") is None
+
+
+def test_delete_is_refused_when_another_message_edited_meanwhile(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _seed("k7qm")
+
+    with _after_read(_pay_by_cash):
+        result = _delete("k7qm", "6.13")
+
+    assert CHANGED_MEANWHILE in result
+    item = _get("k7qm")
+    assert item is not None
+    assert item["payment_method"] == "Cash"
+
+
+def test_delete_is_refused_when_another_message_deleted_meanwhile(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    _seed("k7qm")
+
+    with _after_read(dynamodb.delete_item):
+        result = _delete("k7qm", "6.13")
+
+    assert CHANGED_MEANWHILE in result
+
+
+def test_an_expense_from_before_updated_at_can_still_be_edited(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    legacy = _seed("k7qm")
+    del legacy["updated_at"]
+    dynamodb.put_item(legacy)
+
+    assert _edit("k7qm", "6.13", amount="7.00") == "Edit expense successful."
+    item = _get("k7qm")
+    assert item is not None
+    assert item["amount"] == Decimal("7.00")
+    assert "updated_at" in item
 
 
 # ── get_all_expenses ─────────────────────────────────────────────────────────

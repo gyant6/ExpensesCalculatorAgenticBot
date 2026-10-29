@@ -130,6 +130,130 @@ def test_delete_nonexistent_item(dynamodb_table: DynamoDBClient) -> None:
     dynamodb.delete_item("Unknown", "Unknown")
 
 
+# ── conditional update and delete ────────────────────────────────────────────
+
+VERSIONED_ITEM: dict[str, Any] = {
+    "PK": "USER#00000000",
+    "SK": "EXPENSE#k7qm",
+    "amount": "1.00",
+    "updated_at": "2026-09-15T02:51:00.000000+00:00",
+}
+AS_READ = {"amount": "1.00", "updated_at": "2026-09-15T02:51:00.000000+00:00"}
+
+
+def test_update_item_if_unchanged_applies_when_item_matches(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    dynamodb.put_item(VERSIONED_ITEM)
+
+    applied = dynamodb.update_item_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"amount": "1.50"}, AS_READ
+    )
+
+    assert applied is True
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == {
+        **VERSIONED_ITEM,
+        "amount": "1.50",
+    }
+
+
+def test_update_item_if_unchanged_refuses_a_changed_item(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    changed = {**VERSIONED_ITEM, "updated_at": "2026-09-15T03:00:00.000000+00:00"}
+    dynamodb.put_item(changed)
+
+    applied = dynamodb.update_item_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"amount": "1.50"}, AS_READ
+    )
+
+    assert applied is False
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == changed
+
+
+def test_update_item_if_unchanged_refuses_a_missing_item_without_creating_it(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    applied = dynamodb.update_item_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"amount": "1.50"}, AS_READ
+    )
+
+    assert applied is False
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") is None
+
+
+def test_update_item_if_unchanged_treats_none_as_absent(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    legacy = {key: v for key, v in VERSIONED_ITEM.items() if key != "updated_at"}
+    dynamodb.put_item(legacy)
+
+    applied = dynamodb.update_item_if_unchanged(
+        "USER#00000000",
+        "EXPENSE#k7qm",
+        {"updated_at": "2026-09-15T03:00:00.000000+00:00"},
+        {"amount": "1.00", "updated_at": None},
+    )
+
+    assert applied is True
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"), [({}, AS_READ), ({"amount": "1.50"}, {})]
+)
+def test_update_item_if_unchanged_rejects_empty_arguments(
+    fields: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    with pytest.raises(ValueError):
+        dynamodb.update_item_if_unchanged("unknown", "unknown", fields, expected)
+
+
+def test_delete_item_if_unchanged_deletes_when_item_matches(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    dynamodb.put_item(VERSIONED_ITEM)
+
+    assert dynamodb.delete_item_if_unchanged("USER#00000000", "EXPENSE#k7qm", AS_READ)
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") is None
+
+
+def test_delete_item_if_unchanged_keeps_a_changed_item(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    changed = {**VERSIONED_ITEM, "amount": "2.00"}
+    dynamodb.put_item(changed)
+
+    deleted = dynamodb.delete_item_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", AS_READ
+    )
+
+    assert deleted is False
+    assert dynamodb.get_item("USER#00000000", "EXPENSE#k7qm") == changed
+
+
+def test_delete_item_if_unchanged_refuses_a_missing_item(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    assert not dynamodb.delete_item_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", AS_READ
+    )
+
+
+def test_delete_item_if_unchanged_accepts_only_absent_expectations(
+    dynamodb_table: DynamoDBClient,
+) -> None:
+    dynamodb.put_item({"PK": "USER#00000000", "SK": "EXPENSE#k7qm"})
+
+    assert dynamodb.delete_item_if_unchanged(
+        "USER#00000000", "EXPENSE#k7qm", {"updated_at": None}
+    )
+
+
+def test_delete_item_if_unchanged_rejects_empty_expectations() -> None:
+    with pytest.raises(ValueError):
+        dynamodb.delete_item_if_unchanged("unknown", "unknown", {})
+
+
 def test_query_by_prefix_returns_empty_list(dynamodb_table: DynamoDBClient) -> None:
     item = {
         "PK": "USER#00000000",
