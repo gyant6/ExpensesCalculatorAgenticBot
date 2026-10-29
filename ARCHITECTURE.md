@@ -607,11 +607,15 @@ Test each tool and storage function in complete isolation. All external dependen
 
 Detailed cases are maintained in `tests/unit/`.
 
-#### Layer 2 — Integration Tests (planned)
+#### Layer 2 — Integration Tests
 
-A DynamoDB Local integration suite is planned to cover the add/edit/delete/list flow,
-trip export and cleanup, pagination, and concurrent writes. These tests would exercise
-the real local database API in addition to the existing moto-based unit tests.
+`tests/integration/test_dynamodb_local_trip.py` runs an artificial trip through the
+shared conversation flow and a uniquely named DynamoDB Local table. It checks
+add/edit/delete/list, the confirmation pause, CSV totals, archive and cleanup using a
+scripted model and fixed exchange rates; it makes no paid inference requests. With
+DynamoDB Local running, opt in from Command Prompt with
+`set "RUN_DYNAMODB_LOCAL_TESTS=1" && uv run pytest tests/integration/test_dynamodb_local_trip.py -q`.
+Pagination and concurrent-write coverage remain planned.
 
 #### Layer 2b — Manual end-to-end run via Telegram
 
