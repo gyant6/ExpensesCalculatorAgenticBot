@@ -7,11 +7,25 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from src.bot import trip_analysis
 from src.bot.config import settings
 from src.bot.storage import dynamodb
 
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb import DynamoDBClient
+
+
+@pytest.fixture(autouse=True)
+def no_trip_insights(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    """Keep the post-trip insights model off, whatever a developer's .env says.
+
+    The setting is optional and a local .env could name a model, which would make every
+    test that ends a trip a paid Bedrock call. Tests that want insights supply their own.
+    """
+    monkeypatch.setattr(settings, "AWS_BEDROCK_ANALYSIS_MODEL_ID", None)
+    trip_analysis.reset_model()
+    yield
+    trip_analysis.reset_model()
 
 
 @pytest.fixture(autouse=True)

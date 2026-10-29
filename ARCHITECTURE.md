@@ -11,6 +11,7 @@ An agentic Telegram chatbot — *Zuzu* — that helps users track overseas trave
 | Concern | Choice | Reason |
 |---|---|---|
 | LLM | MiniMax M2.5 (`minimax.minimax-m2.5`) on Bedrock | Evaluated for the bot's tool use and conversations |
+| Trip insights | Claude Sonnet 4.6 (`global.anthropic.claude-sonnet-4-6`) on Bedrock | Writes the short insights message after a trip ends, from figures computed in code ([0015](docs/decisions/0015-trip-insights-from-a-separate-model.md)). Sonnet 4.5 is `LEGACY` in Bedrock; Sonnet 5.5 is not available to this account |
 | Agent framework | LangGraph | Stateful agent execution with built-in checkpointing |
 | LLM integration | `langchain-aws` (`ChatBedrockConverse`) | First-class LangChain/LangGraph integration with Bedrock |
 | Telegram | `python-telegram-bot` | Well-maintained, supports both polling (local) and webhook (Lambda) |
@@ -40,7 +41,9 @@ ExpensesCalculatorAgenticBot/
 │   ├── compare_models.py         # first-response model comparison
 │   ├── model_scenarios.py
 │   ├── evaluate_model.py         # complete conversations using shared operations
-│   └── evaluation_scenarios.json
+│   ├── evaluation_scenarios.json
+│   ├── preview_trip_analysis.py  # fact sheet and insights for sample trips; tunes the prompt
+│   └── trip_fixtures/            # sample trip CSVs for the preview
 ├── src/bot/
 │   ├── main.py                   # local polling and Lambda webhook entry point
 │   ├── agent/                    # graph, nodes, state and system prompt
@@ -52,6 +55,9 @@ ExpensesCalculatorAgenticBot/
 │   ├── dedup.py                  # duplicate webhook delivery detection
 │   ├── timezones.py
 │   ├── export.py                 # CSV export and SGD conversion
+│   ├── trip_facts.py             # figures about a finished trip, computed from the CSV
+│   ├── trip_analysis.py          # insights call, checks on its reply, best-effort wrapper
+│   ├── trip_analysis_prompt.py   # the insights prompt, editable apart from the logic
 │   ├── charts.py
 │   ├── chart_handler.py          # separate chart Lambda entry point
 │   ├── charts_client.py
@@ -242,6 +248,7 @@ sequenceDiagram
     participant DB as DynamoDB
     participant FX as FX API
     participant Charts as Chart renderer
+    participant Insights as Insights model
 
     User->>Handler: Ask to end the trip
     Handler->>Graph: Invoke with the user message
@@ -293,6 +300,11 @@ sequenceDiagram
             Handler->>Handler: Calculate totals from tool-result CSV
             Handler-->>User: Send summary and available attachments
             Handler->>DB: Clear conversation checkpoints after delivery
+            opt Insights are enabled and every expense was converted
+                Handler->>Insights: Figures computed from the delivered CSV
+                Insights-->>Handler: Insights message, or a failure
+                Handler-->>User: Send it only if its checks pass
+            end
         end
     end
 ```
@@ -301,6 +313,11 @@ Duplicate or stale confirmations return before either branch. Attachment-generat
 failures can omit individual files; unexpected graph errors follow the normal handler
 error path. The chart and tool-result FX fetches can return different rates; the delivered
 CSV and text totals always use the same values.
+
+The insights step runs last, after the trip has ended and everything else is delivered, so
+no failure or delay in it can affect trip ending. It never raises into the handler; a
+failed call, a reply that fails its checks, or a Telegram error sending it all leave the
+user with the summary and files they already have.
 
 ### State Definition
 
@@ -469,7 +486,7 @@ All tools are LangChain `@tool`-decorated functions. `ledger_id`, `message_time`
   2. Resumes the graph with `graph.invoke(None, config)`, which runs the node described above.
   3. Calculates totals from the rounded `amount_sgd` cells in the tool's CSV. If any conversion is missing, reports original-currency totals instead of a partial SGD grand total. Sends the calculated text, charts and the same CSV; the pre-rendered CSV is used only if the tool result cannot be recovered.
   4. Calls `clear_thread_history` to delete the thread's checkpoints.
-- **Sent to user:** Code-calculated summary text → pie chart photo → bar chart photo → `expenses.csv` file attachment.
+- **Sent to user:** Code-calculated summary text → pie chart photo → bar chart photo → `expenses.csv` file attachment → insights message, when enabled and it passes its checks.
 
 ### 7. `get_sgd_exchange_rates`
 - **Input:** _(none)_
@@ -508,7 +525,7 @@ The text totals and delivered CSV use one rate snapshot. Charts can use another.
 
 ## Trip Summary (end_trip output)
 
-Sent to the user as four Telegram messages in sequence:
+Sent to the user as up to five Telegram messages in sequence:
 
 **Message 1 — Text (plain text):**
 Code-calculated total SGD spend and per-category breakdown, one line per category:
@@ -530,6 +547,31 @@ Both photos are omitted if rendering fails, or if FX rates were unavailable — 
 
 **Message 4 — File:** `expenses.csv` with columns: `date, summary, category, amount, currency, amount_sgd, payment_method`.
 
+**Message 5 — Insights (plain text, optional):** a few short lines in Zuzu's voice about
+what stood out — what drove the spend, the busiest day, standout expenses, the currency and
+payment mix. It is written by a separate model
+([0015](docs/decisions/0015-trip-insights-from-a-separate-model.md)), which is given a fact
+sheet computed in code from the delivered CSV (`trip_facts.py`): totals, category shares,
+per-day spending, the largest expenses, currencies and payment methods. The prompt
+(`trip_analysis_prompt.py`) leaves the choice of observations to the model and forbids
+arithmetic.
+
+The reply is sent only if it passes checks (`trip_analysis.find_problem`): every number in
+it must be one in the fact sheet (compared by value, so `500` matches `500.00`; whole
+numbers 1–5 are always allowed), no multiplier comparisons such as "3x", no markdown, and
+at most 1,200 characters. Otherwise nothing is sent and the rejected reply is logged. In a
+trial with the final prompt, 3 of 13 calls on the three sample trips were dropped, all on
+the 27-expense trip (3 of its 5 calls), because the model added percentages together or
+gave an approximate figure. The checks cannot catch a false claim that contains no number,
+or a number that coincidentally appears elsewhere in the fact sheet; the prompt rules
+against rankings, causes and exchange-rate talk are the only guard there. Earlier prompt
+versions produced such claims ("the second-busiest day" when it was third, exchange rates
+"moving" when one rate is applied to the whole trip).
+
+It is omitted when insights are not configured, when any expense lacks an SGD conversion,
+or when the trip has no expenses. Locally it is off unless `AWS_BEDROCK_ANALYSIS_MODEL_ID`
+is set, so development and the test suite make no paid calls.
+
 ---
 
 ## Runbook
@@ -550,6 +592,9 @@ AWS_REGION=ap-southeast-1
 AWS_BEDROCK_REGION=ap-southeast-2
 AWS_BEDROCK_MODEL_ID=minimax.minimax-m2.5
 MODEL_MAX_OUTPUT_TOKENS=4096
+AWS_BEDROCK_ANALYSIS_MODEL_ID=   # insights model, e.g. global.anthropic.claude-sonnet-4-6; unset = no insights message
+ANALYSIS_MAX_OUTPUT_TOKENS=400
+ANALYSIS_TIMEOUT_SECONDS=12      # a slower call is abandoned; the user already has the summary
 AWS_ACCESS_KEY_ID=          # local: from ~/.aws/credentials; Lambda: IAM role
 AWS_SECRET_ACCESS_KEY=      # local: from ~/.aws/credentials; Lambda: IAM role
 
@@ -876,10 +921,15 @@ Validate token use and checkpoint overhead under representative workloads.
   breakdown from the rounded values in the attached CSV, with original-currency totals
   when conversion is incomplete. Share this behavior across Telegram, the dev runner
   and model evaluation.
-- [ ] **Add optional end-of-trip analysis.** Use a separate analysis step to pass
-  computed figures to a stronger model for spending patterns and outliers while
-  keeping routine chat on a lower-cost model. Validate summary accuracy and configure
-  model access and deployment permissions before enabling it.
+- [x] **Add optional end-of-trip analysis.** A separate model writes an insights message
+  from figures computed in code, with its reply checked before it is sent
+  ([0015](docs/decisions/0015-trip-insights-from-a-separate-model.md)).
+- [ ] **Measure the insights messages on real trips.** Check the rate at which replies are
+  dropped in the logs, read what was sent for false claims, and tune the prompt in
+  `trip_analysis_prompt.py` with `scripts/preview_trip_analysis.py`. Consider a stricter
+  check, or more derived figures in the fact sheet, if replies are dropped often.
+- [ ] **Move the insights call off the gateway's 30-second path** if it ever pushes the
+  callback past it (see [0008](docs/decisions/0008-redelivered-updates-dropped-by-update-id.md)).
 
 ### Phase 7 — Environments (future)
 

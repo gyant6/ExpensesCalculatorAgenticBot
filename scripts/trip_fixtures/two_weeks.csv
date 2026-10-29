@@ -1,0 +1,28 @@
+date,summary,category,amount,currency,amount_sgd,payment_method
+2026-10-01,Konbini snacks,Food,690,JPY,6.11,Cash
+2026-10-01,Museum entry,Leisure,2040,JPY,18.05,Card
+2026-10-02,Sushi dinner,Food,6880,JPY,60.88,Card
+2026-10-02,Shinkansen to Kyoto,Transport,14580,JPY,129.03,Card
+2026-10-03,Matcha latte,Food,820,JPY,7.26,Cash
+2026-10-04,Ramen,Food,1460,JPY,12.92,Card
+2026-10-04,Suica top-up,Transport,3160,JPY,27.96,Cash
+2026-10-05,Konbini snacks,Food,850,JPY,7.52,Cash
+2026-10-05,Museum entry,Leisure,2200,JPY,19.47,Card
+2026-10-06,Sushi dinner,Food,7040,JPY,62.30,Card
+2026-10-07,Matcha latte,Food,980,JPY,8.67,Cash
+2026-10-07,Temple donation,Misc,780,JPY,6.90,Cash
+2026-10-08,Ramen,Food,1620,JPY,14.34,Card
+2026-10-08,Suica top-up,Transport,3320,JPY,29.38,Cash
+2026-10-09,Konbini snacks,Food,1010,JPY,8.94,Cash
+2026-10-10,Sushi dinner,Food,7200,JPY,63.72,Card
+2026-10-10,Shinkansen to Kyoto,Transport,14900,JPY,131.86,Card
+2026-10-11,Matcha latte,Food,1140,JPY,10.09,Cash
+2026-10-11,Temple donation,Misc,940,JPY,8.32,Cash
+2026-10-12,Ramen,Food,1780,JPY,15.75,Card
+2026-10-13,Konbini snacks,Food,1170,JPY,10.35,Cash
+2026-10-13,Museum entry,Leisure,2520,JPY,22.30,Card
+2026-10-14,Sushi dinner,Food,7360,JPY,65.13,Card
+2026-10-14,Shinkansen to Kyoto,Transport,15060,JPY,133.27,Card
+2026-10-04,Hotel 4 nights,Accommodation,920,USD,1194.81,Card
+2026-10-09,Kimono rental,Shopping,11000,JPY,97.35,Card
+2026-10-14,Pocket wifi,Misc,22.5,SGD,22.50,PayNow

@@ -24,8 +24,13 @@ bedrock_model_id        = "minimax.minimax-m2.5"
 bedrock_region          = "ap-southeast-2"
 model_max_output_tokens = 4096
 
-# The bot's own ceiling. Must cover the worst case of a trip end: a Bedrock call, the FX
-# fetch, the chart invoke, then a second Bedrock call to write the summary.
+# Writes the insights message sent after a trip ends, in bedrock_region. Use a global.*
+# profile: the Bedrock permission recognises only the global, us, eu and apac prefixes.
+# Remove the line to turn the message off.
+analysis_model_id = "global.anthropic.claude-sonnet-4-6"
+
+# The bot's own ceiling. Must cover the worst case of a trip end: the FX fetch, the chart
+# invoke, then the insights call, which is abandoned after ANALYSIS_TIMEOUT_SECONDS.
 lambda_timeout   = 120
 lambda_memory_mb = 1024
 

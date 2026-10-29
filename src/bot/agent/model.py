@@ -57,3 +57,35 @@ def build_bedrock_model(
         max_tokens=max_tokens,
         additional_model_request_fields=request_fields,
     ).bind_tools(tools)
+
+
+def build_analysis_model(
+    client: BaseClient,
+    model_id: str,
+    *,
+    temperature: float | None,
+    max_tokens: int,
+) -> ChatModel:
+    """Build the model that writes the post-trip insights, with no tools bound.
+
+    Separate from build_bedrock_model, which always binds the bot's tools: the insights
+    call only writes text, and a model with no tools cannot act on anything it is told.
+
+    Args:
+        client: Bedrock Runtime client for the chosen model's AWS Region.
+        model_id: Foundation model or inference profile ID.
+        temperature: Sampling temperature, or None to omit it.
+        max_tokens: Output-token limit.
+
+    Returns:
+        A model that accepts LangChain messages and returns a text message.
+
+    Raises:
+        ValueError: If the model configuration is invalid.
+    """
+    return ChatBedrockConverse(
+        client=client,
+        model_id=model_id,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )

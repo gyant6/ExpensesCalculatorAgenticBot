@@ -35,7 +35,7 @@ def extract_end_trip_csv(content: str, success_prefix: str) -> bytes | None:
     return content[start:].encode("utf-8") if start >= 0 else None
 
 
-def _money_cell(raw: str | None) -> Decimal:
+def money_cell(raw: str | None) -> Decimal:
     """Parse a finite amount from a CSV cell or reject a damaged export."""
     if raw is None:
         raise ValueError("Trip CSV contains a missing amount")
@@ -145,7 +145,7 @@ def summarize_csv(csv_bytes: bytes) -> str:
         total = Decimal(0)
         categories: dict[str, Decimal] = {}
         for row in rows:
-            amount = _money_cell(row["amount_sgd"])
+            amount = money_cell(row["amount_sgd"])
             total += amount
             category = row["category"]
             categories[category] = categories.get(category, Decimal(0)) + amount
@@ -157,7 +157,7 @@ def summarize_csv(csv_bytes: bytes) -> str:
 
     currencies: dict[str, Decimal] = {}
     for row in rows:
-        amount = _money_cell(row["amount"])
+        amount = money_cell(row["amount"])
         currency = row["currency"]
         currencies[currency] = currencies.get(currency, Decimal(0)) + amount
     breakdown = "\n".join(

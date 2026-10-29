@@ -23,3 +23,4 @@ Finished work that constrains nothing is not recorded here; git history has it.
 | [0012](0012-versioned-conversation-threads.md) | Versioned conversation threads; check a trip really ended |
 | [0013](0013-bounded-history-and-once-per-turn-checkpoints.md) | Bound the history sent to the model; save the conversation once per turn |
 | [0014](0014-structured-logs-with-a-record-per-turn.md) | Structured JSON logs, with a record of every conversation turn |
+| [0015](0015-trip-insights-from-a-separate-model.md) | Trip insights from a separate model, with figures computed in code |

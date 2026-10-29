@@ -1,0 +1,11 @@
+date,summary,category,amount,currency,amount_sgd,payment_method
+2026-09-12,Flight to Seoul,Flight,412.6,SGD,412.60,Card
+2026-09-12,Airport taxi,Transport,38000,KRW,36.19,Cash
+2026-09-12,Hotel in Myeongdong,Accommodation,540000,KRW,514.29,Card
+2026-09-13,Korean BBQ dinner,Food,86000,KRW,81.90,Card
+2026-09-13,Palace tickets,Leisure,12000,KRW,11.43,Cash
+2026-09-14,Day trip to Busan train,Transport,119000,KRW,113.33,Card
+2026-09-14,Seafood lunch,Food,54000,KRW,51.43,Cash
+2026-09-14,Souvenirs,Shopping,96000,KRW,91.43,Card
+2026-09-15,Travel insurance,Insurance,32.4,SGD,32.40,Card
+2026-09-15,Flight home,Flight,389.0,SGD,389.00,Card

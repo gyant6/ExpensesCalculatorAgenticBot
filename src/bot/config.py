@@ -118,6 +118,17 @@ class Settings(BaseSettings):
     # None omits temperature, matching the evaluated MiniMax M2.5 requests.
     MODEL_TEMPERATURE: float | None = None
     MODEL_MAX_OUTPUT_TOKENS: int | None = None
+    # Model that writes the insights message sent after a trip ends. None turns the
+    # message off, which is the local default so development and tests make no paid
+    # calls. Runs in AWS_BEDROCK_REGION.
+    AWS_BEDROCK_ANALYSIS_MODEL_ID: str | None = None
+    ANALYSIS_MAX_OUTPUT_TOKENS: int = 400
+    # Ceiling on one insights call. The user already has their summary, charts and CSV by
+    # then, and the whole callback must finish within the gateway's 30 s, so a slow model
+    # is abandoned rather than waited for.
+    ANALYSIS_TIMEOUT_SECONDS: int = 12
+    # None omits temperature, since not every model accepts one.
+    ANALYSIS_TEMPERATURE: float | None = None
     # How long a delivered Telegram update's marker is kept, so a redelivery of the same
     # update is recognised and dropped. Telegram's observed redeliveries arrive within
     # seconds of the original; a day leaves a wide margin at a few bytes per update.

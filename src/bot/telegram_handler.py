@@ -25,7 +25,7 @@ from telegram import (
     MessageEntity,
     Update,
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import ContextTypes
 
 from src.bot.agent.graph import (
@@ -62,6 +62,7 @@ from src.bot.storage.dynamodb import (
 )
 from src.bot.tools.expenses import list_expenses
 from src.bot.tools.fx import get_sgd_exchange_rates
+from src.bot.trip_analysis import analyse_trip
 from src.bot.turn_log import TurnKind, TurnOutcome, log_turn
 
 logger = logging.getLogger(__name__)
@@ -699,6 +700,23 @@ async def _send_attachments(
         await message.reply_document(io.BytesIO(csv_bytes), filename=_CSV_FILENAME)
 
 
+async def _send_insights(query: CallbackQuery, text: str) -> None:
+    """Send the trip insights as a reply to the confirmation message.
+
+    Args:
+        query: The callback query whose message the insights reply to.
+        text: The insights message.
+
+    Raises:
+        telegram.error.TelegramError: If Telegram rejects the message.
+    """
+    message = query.message
+    if not isinstance(message, Message):
+        logger.warning("Callback message is unavailable; trip insights were not sent.")
+        return
+    await _reply_in_chunks(message, text)
+
+
 async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process the Yes/No inline keyboard response for ending a trip.
 
@@ -827,12 +845,36 @@ async def handle_callback(update: Update, _context: ContextTypes.DEFAULT_TYPE) -
                 clear_thread_history, _graph, thread_id_for(ledger_id)
             )
 
+        # Last, because it is the only step that can be slow and the user already has
+        # everything that matters. It reports its own failures and never raises.
+        with _timed(timings, "analysis"):
+            analysis = await asyncio.to_thread(analyse_trip, delivered_csv)
+        analysis_counts: dict[str, Any] = {}
+        reply = content
+        if analysis is not None:
+            analysis_counts = {
+                "analysis_input_tokens": analysis.input_tokens,
+                "analysis_output_tokens": analysis.output_tokens,
+            }
+            if analysis.text is not None:
+                try:
+                    await _send_insights(query, analysis.text)
+                except TelegramError:
+                    logger.warning(
+                        "Trip insights could not be sent for ledger %s",
+                        ledger_id,
+                        exc_info=True,
+                    )
+                else:
+                    reply = f"{content}\n\n{analysis.text}"
+
         log_turn(
             **turn_context,
             outcome=TurnOutcome.REPLIED,
             new_messages=new_messages,
-            reply=content,
+            reply=reply,
             expenses=len(expenses),
+            **analysis_counts,
         )
     else:
         turn_context["kind"] = TurnKind.END_TRIP_CANCELLED

@@ -39,6 +39,12 @@ variable "bedrock_region" {
   default     = null
 }
 
+variable "analysis_model_id" {
+  description = "Bedrock model ID that writes the insights message after a trip ends, in the same region as bedrock_model_id. Null turns the message off."
+  type        = string
+  default     = null
+}
+
 variable "model_temperature" {
   description = "Optional model sampling temperature. Null omits the parameter."
   type        = number

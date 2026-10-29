@@ -58,6 +58,28 @@ locals {
 
   # Strips a cross-region routing prefix when an inference profile is selected.
   bedrock_foundation_model_id = replace(var.bedrock_model_id, "/^(global|us|eu|apac)\\./", "")
+
+  # The insights model, when one is set, is granted in the same way as the chat model.
+  # Only the global, us, eu and apac profile prefixes are recognised, so a profile such
+  # as au.* would be treated as a foundation model and denied at runtime.
+  analysis_is_inference_profile = var.analysis_model_id != null && can(regex("^(global|us|eu|apac)\\.", coalesce(var.analysis_model_id, "")))
+  analysis_foundation_model_id  = replace(coalesce(var.analysis_model_id, ""), "/^(global|us|eu|apac)\\./", "")
+
+  bedrock_chat_resources = local.bedrock_is_inference_profile ? tolist([
+    "arn:aws:bedrock:${local.bedrock_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
+    "arn:aws:bedrock:*::foundation-model/${local.bedrock_foundation_model_id}"
+    ]) : tolist([
+    "arn:aws:bedrock:${local.bedrock_region}::foundation-model/${var.bedrock_model_id}"
+  ])
+
+  bedrock_analysis_resources = var.analysis_model_id == null ? tolist([]) : (
+    local.analysis_is_inference_profile ? tolist([
+      "arn:aws:bedrock:${local.bedrock_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.analysis_model_id}",
+      "arn:aws:bedrock:*::foundation-model/${local.analysis_foundation_model_id}"
+      ]) : tolist([
+      "arn:aws:bedrock:${local.bedrock_region}::foundation-model/${var.analysis_model_id}"
+    ])
+  )
 }
 
 resource "aws_ssm_parameter" "telegram_bot_token" {
@@ -147,15 +169,10 @@ resource "aws_iam_role_policy" "lambda_exec_policy" {
       {
         # A direct foundation model needs only its own regional ARN. Inference profiles
         # also need the profile ARN and the foundation models they can route to.
-        Sid    = "Bedrock"
-        Effect = "Allow"
-        Action = ["bedrock:InvokeModel"]
-        Resource = local.bedrock_is_inference_profile ? tolist([
-          "arn:aws:bedrock:${local.bedrock_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_model_id}",
-          "arn:aws:bedrock:*::foundation-model/${local.bedrock_foundation_model_id}"
-          ]) : tolist([
-          "arn:aws:bedrock:${local.bedrock_region}::foundation-model/${var.bedrock_model_id}"
-        ])
+        Sid      = "Bedrock"
+        Effect   = "Allow"
+        Action   = ["bedrock:InvokeModel"]
+        Resource = concat(local.bedrock_chat_resources, local.bedrock_analysis_resources)
       },
       {
         Sid    = "SSMSecrets"
@@ -344,6 +361,8 @@ resource "aws_lambda_function" "bot" {
       WEBHOOK_SECRET_SSM_PATH      = local.ssm_webhook_secret_path
       CHART_LAMBDA_FUNCTION_NAME   = local.chart_function_name
       CHART_LAMBDA_TIMEOUT_SECONDS = tostring(var.chart_client_timeout)
+      }, var.analysis_model_id == null ? {} : {
+      AWS_BEDROCK_ANALYSIS_MODEL_ID = var.analysis_model_id
       }, var.model_temperature == null ? {} : {
       MODEL_TEMPERATURE = tostring(var.model_temperature)
       }, var.model_max_output_tokens == null ? {} : {

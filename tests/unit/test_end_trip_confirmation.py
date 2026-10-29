@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from telegram import Message
+from telegram.error import TelegramError
 
 from src.bot import telegram_handler
 from src.bot.agent.graph import (
@@ -27,6 +28,8 @@ from src.bot.agent.graph import (
 from src.bot.conversation import ConfirmationResult, render_confirmed_trip
 from src.bot.export import generate_csv
 from src.bot.tools.trip import END_TRIP_SUCCESS
+from src.bot.trip_analysis import AnalysisResult
+from src.bot.turn_log import TurnOutcome
 
 LEDGER = 111111111
 
@@ -144,6 +147,145 @@ async def test_an_ended_trip_sends_the_summary_and_files_then_clears(
     harness["clear"].assert_called_once_with(
         harness["graph"], thread_id_for(str(LEDGER))
     )
+
+
+INSIGHTS = "Ramen was your big spender 🍜"
+
+
+@pytest.fixture
+def insights(
+    harness: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """The harness with the insights step replaced, recording what happened and when."""
+    events: list[str] = []
+    harness["message"].reply_photo.side_effect = lambda *_: events.append("photo")
+    harness["message"].reply_document.side_effect = lambda *_, **__: events.append(
+        "csv"
+    )
+    harness["message"].reply_text.side_effect = lambda text: events.append(
+        f"text:{text}"
+    )
+    harness["clear"].side_effect = lambda *_: events.append("clear")
+
+    def analyse(csv_bytes: bytes | None) -> AnalysisResult:
+        events.append("analyse")
+        harness["analysed_csv"] = csv_bytes
+        return AnalysisResult(INSIGHTS, 120, 40, None)
+
+    harness["analyse"] = MagicMock(side_effect=analyse)
+    monkeypatch.setattr(telegram_handler, "analyse_trip", harness["analyse"])
+    log = MagicMock()
+    monkeypatch.setattr(telegram_handler, "log_turn", log)
+    harness["events"] = events
+    harness["log"] = log
+    return harness
+
+
+async def test_the_insights_follow_the_summary_files_and_clearing(
+    insights: dict[str, Any],
+) -> None:
+    await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    assert insights["events"] == [
+        "photo",
+        "photo",
+        "csv",
+        "clear",
+        "analyse",
+        f"text:{INSIGHTS}",
+    ]
+
+
+async def test_the_insights_are_written_from_the_delivered_csv(
+    insights: dict[str, Any],
+) -> None:
+    await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    assert insights["analysed_csv"] == insights["csv_bytes"]
+
+
+async def test_the_turn_log_records_the_insights_and_their_tokens(
+    insights: dict[str, Any],
+) -> None:
+    await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    kwargs = insights["log"].call_args.kwargs
+    assert kwargs["reply"].endswith(f"\n\n{INSIGHTS}")
+    assert kwargs["reply"].startswith("Trip ended! 1 expense recorded.")
+    assert kwargs["analysis_input_tokens"] == 120
+    assert kwargs["analysis_output_tokens"] == 40
+    assert "analysis" in kwargs["timings"]
+    assert kwargs["new_messages"][-1].content == "Trip summary: SGD 200.00"
+
+
+async def test_a_dropped_reply_sends_nothing_extra_but_still_logs_its_tokens(
+    insights: dict[str, Any],
+) -> None:
+    insights["analyse"].side_effect = lambda _csv: AnalysisResult(
+        None, 300, 25, "figures not in the facts: ['99']"
+    )
+
+    await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    insights["message"].reply_text.assert_not_awaited()
+    kwargs = insights["log"].call_args.kwargs
+    assert kwargs["reply"].startswith("Trip ended!") and "\n\n" not in kwargs["reply"]
+    assert kwargs["analysis_input_tokens"] == 300
+
+
+async def test_turned_off_insights_change_nothing(insights: dict[str, Any]) -> None:
+    insights["analyse"].side_effect = lambda _csv: None
+
+    await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    insights["message"].reply_text.assert_not_awaited()
+    kwargs = insights["log"].call_args.kwargs
+    assert "analysis_input_tokens" not in kwargs
+    insights["clear"].assert_called_once()
+
+
+async def test_a_telegram_failure_sending_the_insights_does_not_fail_the_trip(
+    insights: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    insights["message"].reply_text.side_effect = TelegramError("Flood control")
+
+    with caplog.at_level(logging.WARNING):
+        await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    assert "Trip insights could not be sent" in caplog.text
+    insights["clear"].assert_called_once()
+    kwargs = insights["log"].call_args.kwargs
+    assert kwargs["outcome"] == TurnOutcome.REPLIED
+    assert INSIGHTS not in kwargs["reply"]
+
+
+async def test_a_failed_end_trip_sends_no_insights(
+    insights: dict[str, Any],
+) -> None:
+    insights["graph"].invoke.return_value = {
+        "messages": [
+            AIMessage("", tool_calls=[{"id": "b", "name": "end_trip", "args": {}}])
+        ]
+    }
+    insights["trip_item"].return_value = {"SK": "TRIP#ACTIVE"}
+
+    await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    insights["analyse"].assert_not_called()
+    insights["message"].reply_text.assert_not_awaited()
+
+
+async def test_a_duplicate_tap_sends_no_insights(
+    insights: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        telegram_handler, "_claim_confirmation", AsyncMock(return_value=False)
+    )
+
+    await telegram_handler.handle_callback(insights["update"], MagicMock())
+
+    insights["analyse"].assert_not_called()
+    insights["message"].reply_text.assert_not_awaited()
 
 
 async def test_the_graph_is_resumed_on_the_versioned_thread_saving_once(
